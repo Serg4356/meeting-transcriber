@@ -85,12 +85,23 @@ else
 fi
 
 echo "→ Ярлык на рабочий стол…"
-# Псевдоним ломается при пересборке (.app пересоздаётся с новым inode) — если
-# старый есть, удаляем и делаем свежий; не плодим дубликаты.
-rm -f "$HOME/Desktop/$APP_NAME" "$HOME/Desktop/Псевдоним $APP_NAME"* 2>/dev/null
+# Не плодим дубли: сносим старые варианты имени перед созданием свежего.
+LABEL="Meeting Transcriber"
+rm -f "$HOME/Desktop/$APP_NAME" "$HOME/Desktop/$LABEL" \
+      "$HOME/Desktop/Псевдоним $APP_NAME"* 2>/dev/null
+MADE=""
+# 1) Finder-алиас — красивый, с иконкой приложения. Требует разрешения
+#    «управлять Finder» (на свежей машине macOS спросит один раз).
 if osascript -e "tell application \"Finder\" to make alias file to POSIX file \"$DEST\" at desktop" \
-     -e "tell application \"Finder\" to set name of result to \"$APP_NAME\"" >/dev/null 2>&1; then
-  echo "  ярлык обновлён"
+     -e "tell application \"Finder\" to set name of result to \"$LABEL\"" >/dev/null 2>&1; then
+  MADE="алиас"
+else
+  # 2) Фолбэк — симлинк. Не требует НИКАКИХ разрешений, двойной клик так же
+  #    открывает приложение. Важно для не-технических: ярлык будет всегда.
+  ln -sfn "$DEST" "$HOME/Desktop/$LABEL" 2>/dev/null && MADE="симлинк"
+fi
+if [ -n "$MADE" ]; then
+  echo "  ярлык «$LABEL» на рабочем столе создан ($MADE)"
 else
   echo "  ярлык не создан (перетащи $DEST на рабочий стол вручную)"
 fi
