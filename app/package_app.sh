@@ -85,25 +85,26 @@ else
 fi
 
 echo "→ Ярлык на рабочий стол…"
-# Не плодим дубли: сносим старые варианты имени перед созданием свежего.
+# ВАЖНО: только ${VAR} в фигурных скобках. На bash 3.2 (дефолт macOS) под
+# UTF-8-локалью `$VAR` вплотную перед многобайтовым символом (напр. кавычкой-
+# ёлочкой) утягивает его лид-байт в имя переменной -> «unbound variable».
+# Скобки чинят это железно. Не плодим дубли перед созданием свежего ярлыка.
 LABEL="Meeting Transcriber"
-rm -f "$HOME/Desktop/$APP_NAME" "$HOME/Desktop/$LABEL" \
-      "$HOME/Desktop/Псевдоним $APP_NAME"* 2>/dev/null
 MADE=""
-# 1) Finder-алиас — красивый, с иконкой приложения. Требует разрешения
-#    «управлять Finder» (на свежей машине macOS спросит один раз).
-if osascript -e "tell application \"Finder\" to make alias file to POSIX file \"$DEST\" at desktop" \
-     -e "tell application \"Finder\" to set name of result to \"$LABEL\"" >/dev/null 2>&1; then
+rm -f "${HOME}/Desktop/${APP_NAME}" "${HOME}/Desktop/${LABEL}" \
+      "${HOME}/Desktop/Псевдоним ${APP_NAME}"* 2>/dev/null || true
+# 1) Finder-алиас (красивый, с иконкой). Требует разрешения управлять Finder.
+if osascript -e "tell application \"Finder\" to make alias file to POSIX file \"${DEST}\" at desktop" \
+     -e "tell application \"Finder\" to set name of result to \"${LABEL}\"" >/dev/null 2>&1; then
   MADE="алиас"
-else
-  # 2) Фолбэк — симлинк. Не требует НИКАКИХ разрешений, двойной клик так же
-  #    открывает приложение. Важно для не-технических: ярлык будет всегда.
-  ln -sfn "$DEST" "$HOME/Desktop/$LABEL" 2>/dev/null && MADE="симлинк"
+# 2) Фолбэк - симлинк: без разрешений, двойной клик так же открывает приложение.
+elif ln -sfn "${DEST}" "${HOME}/Desktop/${LABEL}" 2>/dev/null; then
+  MADE="символическая ссылка"
 fi
-if [ -n "$MADE" ]; then
-  echo "  ярлык «$LABEL» на рабочем столе создан ($MADE)"
+if [ -n "${MADE}" ]; then
+  echo "  ярлык на рабочем столе создан: ${LABEL} (${MADE})"
 else
-  echo "  ярлык не создан (перетащи $DEST на рабочий стол вручную)"
+  echo "  ярлык не создан - перетащи ${DEST} на рабочий стол вручную"
 fi
 
 echo ""
