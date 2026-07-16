@@ -259,8 +259,12 @@ enum TranscribeRunner {
     /// Возвращает процесс — на «Стоп» ему ставят маркер .stopped и ждут выхода.
     static func startLive(session: URL) -> Process? {
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: AppPaths.python)
-        proc.arguments = [AppPaths.script("live_transcribe.py"), session.path]
+        // Background-QoS: live-транскрипция во время встречи не должна тормозить
+        // передний план (Zoom и т.п.). `taskpolicy -b` → efficiency-ядра, низкий
+        // приоритет CPU/GPU. Модель под железо подбирает сам live_transcribe.py.
+        proc.executableURL = URL(fileURLWithPath: "/usr/sbin/taskpolicy")
+        proc.arguments = ["-b", AppPaths.python,
+                          AppPaths.script("live_transcribe.py"), session.path]
         proc.currentDirectoryURL = URL(fileURLWithPath: AppPaths.projectRoot)
         proc.environment = AppPaths.childEnvironment
         let outPipe = Pipe(), errPipe = Pipe()

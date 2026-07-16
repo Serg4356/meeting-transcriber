@@ -18,12 +18,13 @@ import tempfile
 import time
 from pathlib import Path
 
+import capability
 from transcribe import (
-    Segment, assign_speaker, dedupe_bleed, diarize, hhmmss,
+    MLX_REPOS, Segment, assign_speaker, dedupe_bleed, diarize, hhmmss,
     load_env, prettify_speaker, _is_hallucination,
 )
 
-REPO = "mlx-community/whisper-large-v3-mlx"
+REPO = "mlx-community/whisper-large-v3-mlx"  # переопределяется в main() под железо
 CHUNK_STEP = 30.0   # «своя» зона чанка, сек
 OVERLAP = 3.0       # перекрытие для контекста
 POLL = 12.0         # период опроса растущих файлов, сек
@@ -150,6 +151,14 @@ def main() -> None:
         sys.exit("Использование: python live_transcribe.py <session-dir>")
     session = Path(sys.argv[1])
     load_env()
+
+    # Модель под мощность машины + пониженный приоритет — чтобы live-транскрипция
+    # во время встречи не отжирала ресурсы (см. capability.py).
+    global REPO
+    REPO = MLX_REPOS.get(capability.pick_model("auto"), REPO)
+    capability.apply_nice()
+    print(capability.describe("auto"))
+
     tmp = Path(tempfile.mkdtemp())
     mic_path = session / "mic.caf"
     sys_path = session / "system.caf"

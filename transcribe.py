@@ -284,8 +284,11 @@ def build_transcript(session: Path, model_name: str, language: str | None,
 def main() -> None:
     ap = argparse.ArgumentParser(description="Транскрипт + диаризация записанной встречи")
     ap.add_argument("session", type=Path, help="папка recordings/<timestamp>")
-    ap.add_argument("--model", default="large-v3",
-                    help="whisper модель: tiny/base/small/medium/large-v3 (default large-v3)")
+    ap.add_argument("--model", default="auto",
+                    help="whisper модель или 'auto' — подбор под железо (default auto)")
+    ap.add_argument("--resource-mode", choices=("auto", "low", "high"), default="auto",
+                    help="auto — модель под мощность машины; low — легче+уступать CPU; "
+                         "high — форсировать large-v3 (default auto)")
     ap.add_argument("--language", default="ru", help="код языка или 'auto' (default ru)")
     ap.add_argument("--no-diarize", action="store_true", help="не размечать спикеров")
     ap.add_argument("--speakers", type=int, default=None,
@@ -297,8 +300,17 @@ def main() -> None:
     load_env()
     if not args.session.is_dir():
         raise SystemExit(f"Папка не найдена: {args.session}")
+
+    import capability
+    if args.resource_mode == "low":
+        capability.apply_nice()
+    model = args.model
+    if model == "auto":
+        model = capability.pick_model(args.resource_mode)
+        print(capability.describe(args.resource_mode))
+
     language = None if args.language == "auto" else args.language
-    build_transcript(args.session, args.model, language, not args.no_diarize,
+    build_transcript(args.session, model, language, not args.no_diarize,
                      args.speakers, not args.no_dedupe)
 
 
