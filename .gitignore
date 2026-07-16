@@ -1,0 +1,15 @@
+.venv/
+recordings/
+__pycache__/
+*.pyc
+*.wav
+.DS_Store
+.env
+.build/
+mac-capture/recordings/
+app/.build/
+credentials.json
+.gcal_token.json
+app/logo.svg.png
+*.log
+.pytest_cache/

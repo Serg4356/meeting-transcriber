@@ -1,0 +1,306 @@
+"""Транскрибирует записанную встречу и размечает спикеров.
+
+Пайплайн:
+    1. MLX-whisper (Apple GPU) по обеим дорожкам (mic.wav = "Я", system.wav = собеседники)
+    2. pyannote диаризирует system.wav -> Speaker 1/2/3...
+    3. каждому whisper-сегменту system.wav присваивается спикер по максимальному
+       перекрытию с турном диаризации
+    4. мерж всех сегментов по таймлайну -> transcript.md
+
+Использование:
+    python transcribe.py recordings/2026-07-15_10-30-00
+    python transcribe.py recordings/<...> --model large-v3 --language ru --no-diarize
+
+Диаризация требует HF-токен (env HF_TOKEN или .env) и принятых условий модели
+pyannote/speaker-diarization-community-1 на Hugging Face. Без токена — пропускается
+(--no-diarize или отсутствие HF_TOKEN), все реплики system.wav идут как "Собеседник".
+"""
+from __future__ import annotations
+
+import argparse
+import difflib
+import os
+import re
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+
+
+def mean_volume_db(path: Path) -> float:
+    """Средняя громкость дорожки в dB (через ffmpeg). Тишина ≈ -91 dB.
+    При сбое возвращает 0.0 (трактуется как «есть звук» — безопаснее пропустить фильтр)."""
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-i", str(path), "-af", "volumedetect", "-f", "null", "/dev/null"],
+            capture_output=True, text=True, timeout=120)
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+        return 0.0
+    for line in r.stderr.splitlines():
+        if "mean_volume:" in line:
+            try:
+                return float(line.split("mean_volume:")[1].split("dB")[0].strip())
+            except ValueError:
+                return 0.0
+    return 0.0
+
+
+@dataclass
+class Segment:
+    start: float
+    end: float
+    text: str
+    speaker: str
+
+
+def load_env() -> None:
+    """Подхватывает .env из папки проекта в os.environ (без внешних зависимостей)."""
+    env_path = Path(__file__).parent / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip())
+
+
+def find_track(session: Path, stem: str) -> Path:
+    """Ищет дорожку mic/system с любым расширением (wav от Python, caf от Swift)."""
+    for ext in ("wav", "caf", "m4a", "flac", "aiff"):
+        p = session / f"{stem}.{ext}"
+        if p.exists():
+            return p
+    return session / f"{stem}.wav"  # дефолт для сообщения "не найдено"
+
+
+def hhmmss(sec: float) -> str:
+    m, s = divmod(int(sec), 60)
+    h, m = divmod(m, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+# Whisper на Apple GPU через MLX (Metal) — ~7x быстрее CPU-CTranslate2 на M-серии.
+MLX_REPOS = {
+    "large-v3": "mlx-community/whisper-large-v3-mlx",
+    "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+    "medium": "mlx-community/whisper-medium-mlx",
+    "small": "mlx-community/whisper-small-mlx",
+    "base": "mlx-community/whisper-base-mlx",
+}
+
+
+# Типовые галлюцинации whisper на тишине/паузах (артефакты обучения на YouTube).
+# Дропаем сегмент, если его нормализованный текст — целиком одна из этих фраз.
+HALLUCINATION_PHRASES = {
+    "продолжение следует",
+    "спасибо за просмотр",
+    "спасибо за внимание",
+    "подписывайтесь на канал",
+    "спасибо что смотрите",
+    "до новых встреч",
+    "субтитры сделал dimatorzok",
+    "субтитры создавал dimatorzok",
+    "редактор субтитров а семкин корректор а егорова",
+}
+
+
+_HALLUCINATION_RE = re.compile(
+    r"^(спасибо за субтитры|субтитры .{0,50}(сделал|создал|редактор|подготовил)"
+    r"|редактор субтитров)")
+
+
+def _is_hallucination(text: str) -> bool:
+    n = _norm(text)
+    return n in HALLUCINATION_PHRASES or bool(_HALLUCINATION_RE.match(n))
+
+
+def transcribe_track(repo: str, path: Path,
+                     language: str | None) -> list[tuple[float, float, str]]:
+    """Возвращает список (start, end, text) для дорожки (MLX, GPU)."""
+    # Тихую дорожку не транскрибируем — иначе whisper галлюцинирует
+    # («Продолжение следует…», «Спасибо за просмотр» и т.п.).
+    vol = mean_volume_db(path)
+    if vol < -60:
+        print(f"  {path.name}: тишина ({vol:.0f} dB) — пропуск")
+        return []
+
+    import mlx_whisper
+    result = mlx_whisper.transcribe(
+        str(path), path_or_hf_repo=repo, language=language,
+        condition_on_previous_text=False,  # меньше зацикливаний/галлюцинаций
+    )
+    print(f"  {path.name}: язык={result.get('language', language)}")
+    out = []
+    dropped = 0
+    for seg in result["segments"]:
+        txt = seg["text"].strip()
+        if not txt:
+            continue
+        # Галлюцинации на паузах: типовая фраза-артефакт, либо высокая «нет речи»
+        # + низкая уверенность (у MLX нет VAD, поэтому фильтруем сами).
+        if _is_hallucination(txt) or (
+            seg.get("no_speech_prob", 0.0) > 0.8 and seg.get("avg_logprob", 0.0) < -0.5
+        ):
+            dropped += 1
+            continue
+        out.append((float(seg["start"]), float(seg["end"]), txt))
+    tail = f" (отсеяно {dropped} на тишине)" if dropped else ""
+    print(f"  {path.name}: {len(out)} сегментов{tail}")
+    return out
+
+
+def diarize(path: Path, hf_token: str,
+            num_speakers: int | None = None) -> list[tuple[float, float, str]]:
+    """Возвращает список (start, end, speaker_label) турнов диаризации.
+
+    num_speakers: если известно число участников — подсказать (иначе авто-детект,
+    который на коротких/тихих записях может схлопнуть всех в одного).
+    """
+    import torch
+    from pyannote.audio import Pipeline
+
+    pipeline = Pipeline.from_pretrained(
+        "pyannote/speaker-diarization-community-1", token=hf_token
+    )
+    if torch.backends.mps.is_available():
+        pipeline.to(torch.device("mps"))
+    elif torch.cuda.is_available():
+        pipeline.to(torch.device("cuda"))
+
+    kwargs = {"num_speakers": num_speakers} if num_speakers else {}
+    dia = pipeline(str(path), **kwargs)
+    # pyannote 4.x возвращает DiarizeOutput; аннотация — в .speaker_diarization.
+    # Старые версии возвращают Annotation напрямую.
+    annotation = getattr(dia, "speaker_diarization", dia)
+    turns = [(t.start, t.end, spk)
+             for t, _, spk in annotation.itertracks(yield_label=True)]
+    n_speakers = len({spk for _, _, spk in turns})
+    print(f"  диаризация: {len(turns)} турнов, {n_speakers} спикер(ов)")
+    return turns
+
+
+def assign_speaker(seg_start: float, seg_end: float,
+                   turns: list[tuple[float, float, str]]) -> str:
+    """Присваивает спикера по максимальному перекрытию сегмента с турнами."""
+    best_spk, best_overlap = None, 0.0
+    for t_start, t_end, spk in turns:
+        overlap = max(0.0, min(seg_end, t_end) - max(seg_start, t_start))
+        if overlap > best_overlap:
+            best_spk, best_overlap = spk, overlap
+    return best_spk or "Собеседник"
+
+
+def _norm(text: str) -> str:
+    """Нормализует текст для сравнения: нижний регистр, без пунктуации/лишних пробелов."""
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", text.lower())).strip()
+
+
+def dedupe_bleed(segments: list["Segment"], time_tol: float = 4.0,
+                 sim_threshold: float = 0.7) -> list["Segment"]:
+    """Убирает протечку системного звука в микрофон (эхо из динамиков без наушников).
+
+    Если реплика 'Я' почти дословно совпадает с системной репликой в близком
+    интервале — это тот же звук, пойманный микрофоном. Дропаем микрофонный дубль
+    (чистый источник собеседников — системная дорожка).
+    """
+    system_segs = [s for s in segments if s.speaker != "Я"]
+    if not system_segs:
+        return segments
+    kept: list[Segment] = []
+    dropped = 0
+    for seg in segments:
+        if seg.speaker == "Я":
+            n = _norm(seg.text)
+            if n and any(
+                abs(sys.start - seg.start) <= time_tol
+                and difflib.SequenceMatcher(None, n, _norm(sys.text)).ratio() >= sim_threshold
+                for sys in system_segs
+            ):
+                dropped += 1
+                continue
+        kept.append(seg)
+    if dropped:
+        print(f"  дедуп: убрано {dropped} микрофонных дублей (эхо из динамиков)")
+    return kept
+
+
+def prettify_speaker(label: str) -> str:
+    """SPEAKER_00 -> Собеседник 1."""
+    if label.startswith("SPEAKER_"):
+        try:
+            return f"Собеседник {int(label.split('_')[1]) + 1}"
+        except (IndexError, ValueError):
+            return label
+    return label
+
+
+def build_transcript(session: Path, model_name: str, language: str | None,
+                     do_diarize: bool, num_speakers: int | None = None,
+                     dedupe: bool = True) -> Path:
+    mic = find_track(session, "mic")
+    system = find_track(session, "system")
+
+    repo = MLX_REPOS.get(model_name, model_name)  # можно передать и полный HF-repo
+    print(f"Whisper на GPU (MLX): {model_name} → {repo}")
+
+    segments: list[Segment] = []
+
+    if mic.exists():
+        print("Транскрипция микрофона:")
+        for s, e, txt in transcribe_track(repo, mic, language):
+            segments.append(Segment(s, e, txt, "Я"))
+
+    if system.exists():
+        print("Транскрипция системного звука:")
+        sys_segs = transcribe_track(repo, system, language)
+        turns: list[tuple[float, float, str]] = []
+        hf_token = os.environ.get("HF_TOKEN", "")
+        if do_diarize and hf_token:
+            print("Диаризация системного звука:")
+            try:
+                turns = diarize(system, hf_token, num_speakers)
+            except Exception as e:  # noqa: BLE001 — не терять транскрипт из-за сбоя диаризации
+                print(f"  диаризация не удалась ({e}) — реплики пойдут как «Собеседник»")
+        elif do_diarize and not hf_token:
+            print("  HF_TOKEN не задан — диаризация пропущена (см. README).")
+        for s, e, txt in sys_segs:
+            spk = prettify_speaker(assign_speaker(s, e, turns)) if turns else "Собеседник"
+            segments.append(Segment(s, e, txt, spk))
+
+    if dedupe:
+        segments = dedupe_bleed(segments)
+    segments.sort(key=lambda x: x.start)
+
+    out = session / "transcript.md"
+    lines = [f"# Транскрипт встречи — {session.name}\n"]
+    for seg in segments:
+        lines.append(f"**[{hhmmss(seg.start)}] {seg.speaker}:** {seg.text}")
+    out.write_text("\n\n".join(lines) + "\n", encoding="utf-8")
+    print(f"\nГотово: {out}  ({len(segments)} реплик)")
+    return out
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Транскрипт + диаризация записанной встречи")
+    ap.add_argument("session", type=Path, help="папка recordings/<timestamp>")
+    ap.add_argument("--model", default="large-v3",
+                    help="whisper модель: tiny/base/small/medium/large-v3 (default large-v3)")
+    ap.add_argument("--language", default="ru", help="код языка или 'auto' (default ru)")
+    ap.add_argument("--no-diarize", action="store_true", help="не размечать спикеров")
+    ap.add_argument("--speakers", type=int, default=None,
+                    help="точное число участников (подсказка диаризации; иначе авто)")
+    ap.add_argument("--no-dedupe", action="store_true",
+                    help="не убирать протечку системного звука в микрофон")
+    args = ap.parse_args()
+
+    load_env()
+    if not args.session.is_dir():
+        raise SystemExit(f"Папка не найдена: {args.session}")
+    language = None if args.language == "auto" else args.language
+    build_transcript(args.session, args.model, language, not args.no_diarize,
+                     args.speakers, not args.no_dedupe)
+
+
+if __name__ == "__main__":
+    main()
