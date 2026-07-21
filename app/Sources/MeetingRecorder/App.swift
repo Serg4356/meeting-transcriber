@@ -295,11 +295,8 @@ enum TranscribeRunner {
         var isSuccess: Bool { if case .success = self { return true }; return false }
     }
 
-    /// Папка с готовыми транскриптами (человекочитаемая).
-    static var transcriptsDir: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Documents/Транскрипты встреч")
-    }
+    /// Папка с готовыми транскриптами (человекочитаемая). Меняется в настройках.
+    static var transcriptsDir: URL { AppPaths.transcriptsDir }
 
     /// Запускает live_transcribe.py на время записи (читает растущие .caf).
     /// Возвращает процесс — на «Стоп» ему ставят маркер .stopped и ждут выхода.
@@ -387,84 +384,117 @@ enum TranscribeRunner {
     }
 }
 
+/// Однородная строка меню: иконка + название, кликается вся ширина.
+/// Раньше нижние пункты были разнокалиберными кнопками — из-за этого панель
+/// выглядела собранной из случайных частей, а «Настройки…» терялись в тексте.
+private struct MenuRow: View {
+    let title: String
+    let systemImage: String
+    var action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: systemImage)
+                    .frame(width: 16)
+                    .foregroundStyle(.secondary)
+                Text(title)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+            .background(hovering ? Color.primary.opacity(0.07) : .clear,
+                        in: RoundedRectangle(cornerRadius: 5))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    }
+}
+
 struct ContentView: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                AppLogo(size: 22)
+                AppLogo(size: 20)
                 Text("Meeting Transcriber").font(.headline)
+                Spacer()
             }
 
-            HStack(spacing: 6) {
-                if model.bgJobs > 0 {
-                    ProgressView().controlSize(.small)
-                }
-                Text(model.status)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            // Кнопка НИКОГДА не блокируется фоновой расшифровкой — встречи стык в стык.
+            // Одно главное действие панели — и оно единственное акцентное.
+            // Фоновая расшифровка его НЕ блокирует: встречи бывают стык в стык.
             Button(action: model.toggleRecording) {
-                Label(model.isRecording ? "Стоп" : "Запись",
+                Label(model.isRecording ? "Остановить запись" : "Начать запись",
                       systemImage: model.isRecording ? "stop.fill" : "record.circle")
                     .frame(maxWidth: .infinity)
             }
             .controlSize(.large)
+            .buttonStyle(.borderedProminent)
+            .tint(model.isRecording ? .red : .accentColor)
 
-            if let dest = model.lastTranscript {
-                Button {
-                    NSWorkspace.shared.activateFileViewerSelecting([dest])
-                } label: {
-                    Label("Показать транскрипт в Finder", systemImage: "doc.text.magnifyingglass")
-                        .frame(maxWidth: .infinity)
-                }
+            // Статус — следствие действия, поэтому стоит ПОД кнопкой, а не над.
+            HStack(spacing: 6) {
+                if model.bgJobs > 0 { ProgressView().controlSize(.small) }
+                Text(model.status)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if let nm = model.nextMeeting {
                 Divider()
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Следующая встреча").font(.caption2).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Следующая встреча").font(.caption2).foregroundStyle(.tertiary)
                     Text(nm.title).font(.caption).lineLimit(1)
-                    Text(nm.startsInText).font(.caption2).foregroundStyle(.secondary)
+                    HStack(spacing: 6) {
+                        Text(nm.startsInText).font(.caption2).foregroundStyle(.secondary)
+                        Button("проверить напоминание") { model.testPopup() }
+                            .buttonStyle(.link).font(.caption2)
+                    }
                 }
-                Button("Проверить напоминание") { model.testPopup() }
-                    .buttonStyle(.borderless)
-                    .font(.caption)
             }
-
-            Button {
-                NSWorkspace.shared.open(TranscribeRunner.transcriptsDir)
-            } label: {
-                Label("Папка транскриптов", systemImage: "folder")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderless)
-            .font(.caption)
 
             Divider()
+
+            // Все переходы — одинаковыми строками. «Последний транскрипт» тоже
+            // строка, а не вторая большая кнопка: раньше он визуально дублировал
+            // «Папку транскриптов», хотя открывает конкретный файл, а не папку.
+            VStack(alignment: .leading, spacing: 1) {
+                if let dest = model.lastTranscript {
+                    MenuRow(title: "Открыть последний транскрипт",
+                            systemImage: "doc.text") {
+                        NSWorkspace.shared.activateFileViewerSelecting([dest])
+                    }
+                }
+                MenuRow(title: "Мои встречи…", systemImage: "list.bullet") {
+                    model.openTranscripts()
+                }
+                MenuRow(title: "Все транскрипты в Finder", systemImage: "folder") {
+                    NSWorkspace.shared.open(AppPaths.transcriptsDir)
+                }
+                MenuRow(title: "Настройки…", systemImage: "gearshape") {
+                    model.openSettings()
+                }
+            }
+
+            Divider()
+
             Toggle("Запускать при входе", isOn: Binding(
                 get: { model.launchAtLogin },
                 set: { model.setLaunchAtLogin($0) }))
                 .toggleStyle(.checkbox)
                 .font(.caption)
+                .padding(.horizontal, 6)
 
-            Button("Мои встречи…") { model.openTranscripts() }
-                .buttonStyle(.borderless)
-                .font(.caption)
-
-            Button("Настройки…") { model.openSettings() }
-                .buttonStyle(.borderless)
-                .font(.caption)
-
-            Button("Выход") { NSApplication.shared.terminate(nil) }
-                .buttonStyle(.borderless)
+            MenuRow(title: "Выход", systemImage: "power") {
+                NSApplication.shared.terminate(nil)
+            }
         }
-        .padding(14)
-        .frame(width: 280)
+        .padding(12)
+        .frame(width: 290)
     }
 }
 

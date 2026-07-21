@@ -72,5 +72,24 @@ enum AppPaths {
         URL(fileURLWithPath: "\(projectRoot)/mac-capture/recordings")
     }
 
+    // MARK: - Куда складывать готовые транскрипты
+    //
+    // Это ОТДЕЛЬНАЯ от записей папка: аудио весит гигабайты и нужно редко,
+    // а транскрипты человек читает постоянно и хранит рядом с рабочими файлами.
+
+    static let transcriptsDirKey = "transcriptsDir"
+
+    static var defaultTranscriptsDir: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Documents/Транскрипты встреч")
+    }
+
+    static var transcriptsDir: URL {
+        if let p = UserDefaults.standard.string(forKey: transcriptsDirKey), !p.isEmpty {
+            return URL(fileURLWithPath: (p as NSString).expandingTildeInPath)
+        }
+        return defaultTranscriptsDir
+    }
+
     static func script(_ name: String) -> String { "\(projectRoot)/\(name)" }
 }

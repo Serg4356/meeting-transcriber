@@ -111,8 +111,48 @@ enum CH {
 
 // MARK: - UI
 
+/// Строка выбора папки. Вынесена отдельно, потому что папок теперь две
+/// (записи и транскрипты), и дублировать одну и ту же вёрстку смысла нет.
+private struct FolderRow: View {
+    let title: String
+    let hint: String
+    let defaultPath: String
+    @Binding var path: String
+
+    private var shown: String { path.isEmpty ? defaultPath : path }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.callout)
+            Text(shown).font(.caption).foregroundStyle(.secondary)
+                .textSelection(.enabled).lineLimit(1).truncationMode(.head)
+            HStack(spacing: 8) {
+                Button("Выбрать…") {
+                    let p = NSOpenPanel()
+                    p.canChooseDirectories = true
+                    p.canChooseFiles = false
+                    p.canCreateDirectories = true
+                    p.directoryURL = URL(fileURLWithPath: shown)
+                    if p.runModal() == .OK, let url = p.url { path = url.path }
+                }
+                Button("Открыть") {
+                    NSWorkspace.shared.open(URL(fileURLWithPath: shown))
+                }
+                if !path.isEmpty {
+                    Button("По умолчанию") { path = "" }
+                }
+                Spacer()
+            }
+            .controlSize(.small)
+            Text(hint).font(.caption2).foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
 struct SettingsView: View {
     @AppStorage(AppPaths.recordingsDirKey) private var recDir: String = ""
+    @AppStorage(AppPaths.transcriptsDirKey) private var txtDir: String = ""
     @State private var host = DBConfig.host
     @State private var user = DBConfig.user
     @State private var table = DBConfig.table
@@ -125,63 +165,47 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            GroupBox("Папка записей") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(recPath).font(.caption).foregroundStyle(.secondary)
-                        .textSelection(.enabled).lineLimit(2)
-                    HStack {
-                        Button("Выбрать…", action: pickFolder)
-                        Button("Показать в Finder") {
-                            NSWorkspace.shared.open(URL(fileURLWithPath: recPath))
-                        }
-                        if !recDir.isEmpty {
-                            Button("Сбросить") { recDir = "" }
-                        }
-                    }
-                    if legacyHasSessions {
-                        Text("Старые записи остались в \(AppPaths.legacyRecordingsDir.path) — "
-                             + "перенеси их сюда, если нужны.")
-                            .font(.caption2).foregroundStyle(.orange)
-                    }
-                }.padding(4)
+        // Form/Section — стандартная для macOS группировка настроек;
+        // ручные VStack+GroupBox выглядят самодельно и разъезжаются по отступам.
+        Form {
+            Section("Где хранить") {
+                FolderRow(title: "Транскрипты",
+                          hint: "Готовый текст встреч — его читаете вы",
+                          defaultPath: AppPaths.defaultTranscriptsDir.path,
+                          path: $txtDir)
+                FolderRow(title: "Записи (аудио)",
+                          hint: "Исходный звук, весит гигабайты — нужен для перепрогона",
+                          defaultPath: AppPaths.defaultRecordingsDir.path,
+                          path: $recDir)
+                if legacyHasSessions {
+                    Label("Старые записи остались в \(AppPaths.legacyRecordingsDir.path)",
+                          systemImage: "exclamationmark.triangle")
+                        .font(.caption2).foregroundStyle(.orange)
+                }
             }
 
-            GroupBox("Выгрузка в корпоративную БД") {
-                VStack(alignment: .leading, spacing: 6) {
-                    LabeledContent("Хост") {
-                        TextField("clickhouse.internal", text: $host).textFieldStyle(.roundedBorder)
+            Section("Выгрузка в общую базу") {
+                TextField("Хост", text: $host, prompt: Text("clickhouse.internal"))
+                TextField("Пользователь", text: $user, prompt: Text("логин"))
+                SecureField("Пароль", text: $password, prompt: Text("хранится в Keychain"))
+                TextField("Таблица", text: $table, prompt: Text("схема.таблица"))
+                HStack {
+                    Button("Сохранить и проверить", action: saveAndCheck)
+                        .disabled(checking)
+                    if checking { ProgressView().controlSize(.small) }
+                    if let r = checkResult {
+                        Text(r).font(.caption)
+                            .foregroundStyle(r.hasPrefix("✓") ? .green : .red)
+                            .lineLimit(2)
                     }
-                    LabeledContent("Пользователь") {
-                        TextField("логин", text: $user).textFieldStyle(.roundedBorder)
-                    }
-                    LabeledContent("Пароль") {
-                        SecureField("хранится в Keychain", text: $password)
-                            .textFieldStyle(.roundedBorder)
-                    }
-                    LabeledContent("Таблица") {
-                        TextField("схема.таблица", text: $table)
-                            .textFieldStyle(.roundedBorder)
-                    }
-                    HStack {
-                        Button("Сохранить и проверить", action: saveAndCheck)
-                            .disabled(checking)
-                        if checking { ProgressView().controlSize(.small) }
-                        if let r = checkResult {
-                            Text(r).font(.caption)
-                                .foregroundStyle(r.hasPrefix("✓") ? .green : .red)
-                                .lineLimit(2)
-                        }
-                    }
-                }.padding(4)
+                }
+                Text("Ничего не выгружается само — только встречи, которые вы отметите "
+                     + "в «Мои встречи…».")
+                    .font(.caption2).foregroundStyle(.secondary)
             }
-
-            Text("Транскрипты не выгружаются автоматически — только те встречи, "
-                 + "которые ты сам отметишь.")
-                .font(.caption2).foregroundStyle(.secondary)
         }
-        .padding(16)
-        .frame(width: 460)
+        .formStyle(.grouped)
+        .frame(width: 460, height: 640)
     }
 
     private var legacyHasSessions: Bool {
