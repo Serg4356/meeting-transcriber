@@ -208,12 +208,15 @@ struct SettingsView: View {
         .frame(width: 460, height: 640)
     }
 
+    /// Есть ли в старом месте РЕАЛЬНЫЕ записи. Скрытые файлы не считаем:
+    /// одного забытого .DS_Store хватало, чтобы вечно показывать предупреждение
+    /// про «старые записи», которых там давно нет.
     private var legacyHasSessions: Bool {
         let legacy = AppPaths.legacyRecordingsDir
         guard legacy.path != recPath,
               let items = try? FileManager.default.contentsOfDirectory(atPath: legacy.path)
         else { return false }
-        return !items.isEmpty
+        return items.contains { !$0.hasPrefix(".") }
     }
 
     private func pickFolder() {
