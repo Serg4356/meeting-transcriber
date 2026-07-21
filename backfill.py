@@ -59,13 +59,14 @@ def fetch_event(start: datetime, tolerance_min: int = 15) -> dict | None:
 
 
 def write_meta(session: Path, ev: dict) -> dict:
+    from calendar_watch import attendee_name  # одна логика имён на весь проект
+
     att = [a for a in ev.get("attendees", []) if not a.get("resource")]
     meta = {
         "title": ev.get("summary", session.name),
-        "attendees": [a.get("displayName") or a.get("email", "") for a in att],
+        "attendees": [attendee_name(a) for a in att],
         "accepted_count": sum(1 for a in att if a.get("responseStatus") == "accepted"),
-        "others": [a.get("displayName") or a.get("email", "")
-                   for a in att if not a.get("self")],
+        "others": [attendee_name(a) for a in att if not a.get("self")],
     }
     (session / "meeting.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")

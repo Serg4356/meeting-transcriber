@@ -59,6 +59,28 @@ def get_credentials(interactive: bool) -> Credentials:
     return creds
 
 
+def humanize_name(raw: str) -> str:
+    """Почта → читаемое имя: 'i.petrov@example.com' → 'I. Petrov'.
+
+    Календарь отдаёт displayName далеко не всегда, и тогда в транскрипте вместо
+    имени человека стоит адрес — читать такое невозможно, а именно этот текст
+    уходит коллегам в общую базу.
+    """
+    if "@" not in raw:
+        return raw
+    local = raw.split("@", 1)[0]
+    parts = [p for p in re.split(r"[._\-+]+", local) if p]
+    if not parts:
+        return raw
+    # односимвольный кусок — это инициал ('d' → 'D.'), остальное с заглавной
+    return " ".join(p.upper() + "." if len(p) == 1 else p.capitalize() for p in parts)
+
+
+def attendee_name(a: dict) -> str:
+    """Имя участника: displayName, иначе — почта, приведённая к читаемому виду."""
+    return a.get("displayName") or humanize_name(a.get("email", ""))
+
+
 def extract_meeting_url(event: dict) -> str | None:
     if event.get("hangoutLink"):
         return event["hangoutLink"]
@@ -102,13 +124,12 @@ def upcoming(within_min: int, require_link: bool) -> list[dict]:
         # верхняя: половина приглашённых обычно молчит, поэтому фиксировать
         # точное число нельзя — заставим алгоритм дробить одного человека на двух.
         attendees = [a for a in ev.get("attendees", []) if not a.get("resource")]
-        names = [a.get("displayName") or a.get("email", "") for a in attendees]
+        names = [attendee_name(a) for a in attendees]
         accepted = sum(1 for a in attendees if a.get("responseStatus") == "accepted")
         # Кто на встрече КРОМЕ меня. Нужно для авто-разметки голосов: если в
         # списке остался ровно один человек, то единственный чужой голос на
         # записи принадлежит ему — разметка получается без ручной работы.
-        others = [a.get("displayName") or a.get("email", "")
-                  for a in attendees if not a.get("self")]
+        others = [attendee_name(a) for a in attendees if not a.get("self")]
         result.append({
             "id": ev.get("id"),
             "title": ev.get("summary", "(без названия)"),

@@ -84,11 +84,32 @@ enum TranscriptStore {
         return found.sorted()
     }
 
-    static func attendees(_ session: URL) -> [String] {
+    private static func metaList(_ session: URL, _ key: String) -> [String] {
         guard let d = try? Data(contentsOf: session.appendingPathComponent("meeting.json")),
               let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-              let list = j["attendees"] as? [String] else { return [] }
+              let list = j[key] as? [String] else { return [] }
         return list
+    }
+
+    static func attendees(_ session: URL) -> [String] { metaList(session, "attendees") }
+
+    /// Как звать автора записи в общей базе.
+    ///
+    /// Локально его реплики помечены «Я» — так удобно читать свой транскрипт.
+    /// Но в общей базе «Я» у каждого свой: пятеро выгрузят встречи, и в каждой
+    /// будет «Я» про разных людей. Поэтому при выгрузке подставляем имя.
+    /// Берём его из календаря: это тот участник, которого нет среди «остальных».
+    static func ownerName(_ session: URL) -> String {
+        let others = Set(metaList(session, "others"))
+        if let me = attendees(session).first(where: { !others.contains($0) }) { return me }
+        return DBConfig.user.isEmpty ? "Автор записи" : DBConfig.user
+    }
+
+    /// Текст для общей базы: «Я» заменено на имя автора.
+    /// Локальный файл не трогаем — там «Я» остаётся.
+    static func bodyForSharing(_ session: URL) -> String {
+        transcriptText(session)
+            .replacingOccurrences(of: "] Я:**", with: "] \(ownerName(session)):**")
     }
 
     /// Что из моего уже лежит в базе: ключ → хэш опубликованной версии.
@@ -109,7 +130,7 @@ enum TranscriptStore {
     }
 
     static func push(_ item: MeetingItem) async throws {
-        try await insert(item: item, body: transcriptText(item.session), deleted: 0)
+        try await insert(item: item, body: bodyForSharing(item.session), deleted: 0)
     }
 
     /// Откат — не DELETE, а новая версия с флагом. Вью её не показывает.
@@ -173,7 +194,7 @@ final class TranscriptsModel: ObservableObject {
     private func refreshStale(_ state: [String: String]) async {
         var updated = 0
         for item in items where item.published {
-            let local = TranscriptStore.contentHash(TranscriptStore.transcriptText(item.session))
+            let local = TranscriptStore.contentHash(TranscriptStore.bodyForSharing(item.session))
             guard let remote = state[item.id], !remote.isEmpty, remote != local else { continue }
             do {
                 try await TranscriptStore.push(item)
