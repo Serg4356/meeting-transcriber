@@ -97,12 +97,21 @@ def upcoming(within_min: int, require_link: bool) -> list[dict]:
         url = extract_meeting_url(ev)
         if require_link and not url:
             continue
+        # Участники: имена нужны в шапке транскрипта (кто вообще был на встрече),
+        # а число подтвердивших — как ВЕРХНЯЯ граница для диаризации. Именно
+        # верхняя: половина приглашённых обычно молчит, поэтому фиксировать
+        # точное число нельзя — заставим алгоритм дробить одного человека на двух.
+        attendees = [a for a in ev.get("attendees", []) if not a.get("resource")]
+        names = [a.get("displayName") or a.get("email", "") for a in attendees]
+        accepted = sum(1 for a in attendees if a.get("responseStatus") == "accepted")
         result.append({
             "id": ev.get("id"),
             "title": ev.get("summary", "(без названия)"),
             "start": start.isoformat(),
             "minutes_until": round(minutes_until, 1),
             "meeting_url": url,
+            "attendees": [n for n in names if n],
+            "accepted_count": accepted,
         })
     return result
 

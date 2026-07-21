@@ -126,10 +126,28 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Встреча, которая идёт прямо сейчас (по календарю).
+    private func currentMeeting() -> Meeting? {
+        guard let m = nextMeeting, m.minutesUntil <= 2 else { return nil }
+        return m
+    }
+
+    /// Кладём рядом с записью данные встречи из календаря — транскрайбер возьмёт
+    /// оттуда название, список участников (в шапку) и верхнюю границу числа
+    /// говорящих для диаризации.
+    private func writeMeetingMeta(session: URL) {
+        guard let m = currentMeeting() else { return }
+        let meta: [String: Any] = ["title": activeMeetingTitle ?? m.title,
+                                   "attendees": m.attendees,
+                                   "accepted_count": m.acceptedCount]
+        guard let data = try? JSONSerialization.data(withJSONObject: meta,
+                                                     options: [.prettyPrinted]) else { return }
+        try? data.write(to: session.appendingPathComponent("meeting.json"))
+    }
+
     /// Название встречи, которая идёт прямо сейчас (для имени файла при ручной записи).
     private func currentMeetingTitle() -> String? {
-        guard let m = nextMeeting, m.minutesUntil <= 2 else { return nil }
-        return m.title
+        return currentMeeting()?.title
     }
 
     func startRecording(title: String? = nil) {
@@ -139,6 +157,7 @@ final class AppModel: ObservableObject {
             do {
                 let session = try await recorder.start(baseDir: baseDir)
                 lastSession = session
+                writeMeetingMeta(session: session)
                 phase = .recording
                 startElapsedTimer()
                 recControl.show(model: self) { [weak self] in self?.requestStop() }

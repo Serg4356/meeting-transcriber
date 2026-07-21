@@ -150,11 +150,16 @@ def transcribe_track(repo: str, path: Path,
 
 
 def diarize(path: Path, hf_token: str,
-            num_speakers: int | None = None) -> list[tuple[float, float, str]]:
+            num_speakers: int | None = None,
+            max_speakers: int | None = None) -> list[tuple[float, float, str]]:
     """Возвращает список (start, end, speaker_label) турнов диаризации.
 
-    num_speakers: если известно число участников — подсказать (иначе авто-детект,
-    который на коротких/тихих записях может схлопнуть всех в одного).
+    num_speakers: точное число говорящих, если оно достоверно известно.
+    max_speakers: верхняя граница. Именно её стоит брать из календаря —
+        подтвердивших приглашение обычно больше, чем реально говоривших
+        (на встрече из 15 человек говорят 13, остальные молчат). Если
+        зафиксировать точное число, алгоритм начнёт дробить одного
+        человека на нескольких, чтобы добить до заданного количества.
     """
     import torch
     from pyannote.audio import Pipeline
@@ -167,7 +172,11 @@ def diarize(path: Path, hf_token: str,
     elif torch.cuda.is_available():
         pipeline.to(torch.device("cuda"))
 
-    kwargs = {"num_speakers": num_speakers} if num_speakers else {}
+    kwargs: dict[str, int] = {}
+    if num_speakers:
+        kwargs["num_speakers"] = num_speakers
+    elif max_speakers:
+        kwargs["max_speakers"] = max_speakers
     dia = pipeline(str(path), **kwargs)
     # pyannote 4.x возвращает DiarizeOutput; аннотация — в .speaker_diarization.
     # Старые версии возвращают Annotation напрямую.
@@ -258,6 +267,19 @@ def dedupe_bleed(segments: list["Segment"], time_tol: float = 10.0,
     return kept
 
 
+def load_meeting_meta(session: Path) -> dict:
+    """Данные встречи из календаря (пишет приложение при старте записи):
+    {"title": ..., "attendees": [...], "accepted_count": N}. Нет файла — пусто."""
+    p = session / "meeting.json"
+    if not p.exists():
+        return {}
+    try:
+        import json
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return {}
+
+
 def prettify_speaker(label: str) -> str:
     """SPEAKER_00 -> Собеседник 1."""
     if label.startswith("SPEAKER_"):
@@ -273,6 +295,7 @@ def build_transcript(session: Path, model_name: str, language: str | None,
                      dedupe: bool = True) -> Path:
     mic = find_track(session, "mic")
     system = find_track(session, "system")
+    meta = load_meeting_meta(session)
 
     repo = MLX_REPOS.get(model_name, model_name)  # можно передать и полный HF-repo
     print(f"Whisper на GPU (MLX): {model_name} → {repo}")
@@ -291,8 +314,13 @@ def build_transcript(session: Path, model_name: str, language: str | None,
         hf_token = os.environ.get("HF_TOKEN", "")
         if do_diarize and hf_token:
             print("Диаризация системного звука:")
+            # Из календаря берём ВЕРХНЮЮ границу (кто подтвердил приглашение) —
+            # часть из них на встрече молчит, точное число задавать нельзя.
+            cap = meta.get("accepted_count") or None
+            if cap and not num_speakers:
+                print(f"  подтвердили приглашение: {cap} → верхняя граница спикеров")
             try:
-                turns = diarize(system, hf_token, num_speakers)
+                turns = diarize(system, hf_token, num_speakers, max_speakers=cap)
             except Exception as e:  # noqa: BLE001 — не терять транскрипт из-за сбоя диаризации
                 print(f"  диаризация не удалась ({e}) — реплики пойдут как «Собеседник»")
         elif do_diarize and not hf_token:
@@ -306,7 +334,12 @@ def build_transcript(session: Path, model_name: str, language: str | None,
     segments.sort(key=lambda x: x.start)
 
     out = session / "transcript.md"
-    lines = [f"# Транскрипт встречи — {session.name}\n"]
+    title = meta.get("title") or session.name
+    lines = [f"# Транскрипт встречи — {title}\n"]
+    # Кто был на встрече: спикеров алгоритм называет «Собеседник N», и без
+    # списка участников читатель вообще не понимает, чьи это реплики.
+    if meta.get("attendees"):
+        lines.append("**Участники:** " + ", ".join(meta["attendees"]) + "\n")
     for seg in segments:
         lines.append(f"**[{hhmmss(seg.start)}] {seg.speaker}:** {seg.text}")
     out.write_text("\n\n".join(lines) + "\n", encoding="utf-8")

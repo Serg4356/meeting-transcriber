@@ -8,11 +8,35 @@ struct Meeting: Decodable, Identifiable, Equatable {
     let start: String
     let minutesUntil: Double
     let meetingUrl: String?
+    /// Кто приглашён — идёт в шапку транскрипта: метка «Собеседник 7» сама по
+    /// себе бесполезна, список участников хотя бы даёт читателю контекст.
+    let attendees: [String]
+    /// Сколько подтвердили — ВЕРХНЯЯ граница числа говорящих для диаризации.
+    let acceptedCount: Int
 
     enum CodingKeys: String, CodingKey {
-        case id, title, start
+        case id, title, start, attendees
         case minutesUntil = "minutes_until"
         case meetingUrl = "meeting_url"
+        case acceptedCount = "accepted_count"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        start = try c.decode(String.self, forKey: .start)
+        minutesUntil = try c.decode(Double.self, forKey: .minutesUntil)
+        meetingUrl = try c.decodeIfPresent(String.self, forKey: .meetingUrl)
+        attendees = try c.decodeIfPresent([String].self, forKey: .attendees) ?? []
+        acceptedCount = try c.decodeIfPresent(Int.self, forKey: .acceptedCount) ?? 0
+    }
+
+    init(id: String, title: String, start: String, minutesUntil: Double,
+         meetingUrl: String?, attendees: [String] = [], acceptedCount: Int = 0) {
+        self.id = id; self.title = title; self.start = start
+        self.minutesUntil = minutesUntil; self.meetingUrl = meetingUrl
+        self.attendees = attendees; self.acceptedCount = acceptedCount
     }
 
     var url: URL? { meetingUrl.flatMap { URL(string: $0) } }
