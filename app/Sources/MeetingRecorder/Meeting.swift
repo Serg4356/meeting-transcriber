@@ -41,8 +41,12 @@ struct Meeting: Decodable, Identifiable, Equatable {
 
     var url: URL? { meetingUrl.flatMap { URL(string: $0) } }
 
+    /// Идёт ли встреча прямо сейчас (началась, но не закончилась).
+    var isRunning: Bool { minutesUntil < 0 }
+
     var startsInText: String {
         let m = Int(minutesUntil.rounded())
+        if m < -1 { return "идёт \(-m) мин" }
         if m <= 0 { return "начинается сейчас" }
         if m == 1 { return "через 1 минуту" }
         if m < 60 { return "через \(m) мин" }

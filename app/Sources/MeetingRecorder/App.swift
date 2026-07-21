@@ -85,7 +85,10 @@ final class AppModel: ObservableObject {
         Task {
             let meetings = await Task.detached { CalendarRunner.fetch(withinMinutes: 1440) }.value
             nextMeeting = meetings.first
-            for m in meetings where m.minutesUntil <= leadMinutes && !alertedIDs.contains(m.id) {
+            // Календарь теперь отдаёт и уже идущие встречи (у них minutesUntil
+            // отрицательный) — напоминать о них «встреча скоро» бессмысленно.
+            for m in meetings where m.minutesUntil >= 0 && m.minutesUntil <= leadMinutes
+                                   && !alertedIDs.contains(m.id) {
                 alertedIDs.insert(m.id)
                 presentPopup(m)
                 break
@@ -127,6 +130,9 @@ final class AppModel: ObservableObject {
     }
 
     /// Встреча, которая идёт прямо сейчас (по календарю).
+    /// Встреча, к которой относится запись: уже идущая или начинающаяся вот-вот.
+    /// Отрицательный minutesUntil = встреча в разгаре; именно так обычно и бывает,
+    /// потому что запись включают, уже подключившись к звонку.
     private func currentMeeting() -> Meeting? {
         guard let m = nextMeeting, m.minutesUntil <= 2 else { return nil }
         return m

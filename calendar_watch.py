@@ -81,6 +81,25 @@ def attendee_name(a: dict) -> str:
     return a.get("displayName") or humanize_name(a.get("email", ""))
 
 
+def event_window(ev: dict, now: datetime) -> tuple[float, bool] | None:
+    """(минут до начала, идёт ли сейчас) или None, если событие не подходит.
+
+    Встречу, которая УЖЕ ИДЁТ, отбрасывать нельзя: запись обычно включают,
+    уже подключившись к звонку. Раньше такие события отсекались, и транскрипт
+    оставался без названия — брать его было неоткуда.
+    """
+    start_raw = ev.get("start", {}).get("dateTime")
+    if not start_raw:          # all-day — не встреча
+        return None
+    start = datetime.fromisoformat(start_raw)
+    end_raw = ev.get("end", {}).get("dateTime")
+    end = datetime.fromisoformat(end_raw) if end_raw else start
+    if now >= end:             # закончилась
+        return None
+    minutes_until = (start - now).total_seconds() / 60.0
+    return round(minutes_until, 1), minutes_until < 0
+
+
 def extract_meeting_url(event: dict) -> str | None:
     if event.get("hangoutLink"):
         return event["hangoutLink"]
@@ -101,7 +120,8 @@ def upcoming(within_min: int, require_link: bool) -> list[dict]:
     time_max = now + timedelta(minutes=within_min)
     events = service.events().list(
         calendarId="primary",
-        timeMin=now.isoformat(),
+        # на 3 часа назад — чтобы попали встречи, которые уже идут
+        timeMin=(now - timedelta(hours=3)).isoformat(),
         timeMax=time_max.isoformat(),
         singleEvents=True,
         orderBy="startTime",
@@ -109,13 +129,11 @@ def upcoming(within_min: int, require_link: bool) -> list[dict]:
 
     result = []
     for ev in events:
-        start_raw = ev.get("start", {}).get("dateTime")
-        if not start_raw:  # all-day — пропускаем
+        win = event_window(ev, now)
+        if win is None:
             continue
-        start = datetime.fromisoformat(start_raw)
-        minutes_until = (start - now).total_seconds() / 60.0
-        if minutes_until < 0:
-            continue
+        minutes_until, _running = win
+        start = datetime.fromisoformat(ev["start"]["dateTime"])
         url = extract_meeting_url(ev)
         if require_link and not url:
             continue
