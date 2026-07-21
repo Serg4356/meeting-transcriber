@@ -3,6 +3,7 @@
 // (передумал), убрать из базы (передумал обратно).
 
 import AppKit
+import CryptoKit
 import SwiftUI
 
 struct MeetingItem: Identifiable {
@@ -57,20 +58,58 @@ enum TranscriptStore {
             }
     }
 
-    /// Что из моего уже лежит в общей базе.
-    static func publishedKeys() async throws -> Set<String> {
+    static func transcriptText(_ session: URL) -> String {
+        (try? String(contentsOf: session.appendingPathComponent("transcript.md"),
+                     encoding: .utf8)) ?? ""
+    }
+
+    /// Отпечаток содержимого. Транскрипты меняются задним числом: библиотека
+    /// голосов растёт, и «Собеседник 3» превращается в имя. Без хэша копия в
+    /// базе тихо устаревает и при этом выглядит свежей.
+    static func contentHash(_ text: String) -> String {
+        SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Кто реально говорил — вытаскиваем из готового транскрипта.
+    /// Даёт коллегам поиск «встречи, где говорил X» без чтения тела.
+    static func speakers(in text: String) -> [String] {
+        var found: Set<String> = []
+        for line in text.split(separator: "\n") {
+            guard line.hasPrefix("**["), let close = line.range(of: "] "),
+                  let colon = line.range(of: ":**") , close.upperBound < colon.lowerBound
+            else { continue }
+            let name = String(line[close.upperBound..<colon.lowerBound])
+            if name != "Я" { found.insert(name) }
+        }
+        return found.sorted()
+    }
+
+    static func attendees(_ session: URL) -> [String] {
+        guard let d = try? Data(contentsOf: session.appendingPathComponent("meeting.json")),
+              let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+              let list = j["attendees"] as? [String] else { return [] }
+        return list
+    }
+
+    /// Что из моего уже лежит в базе: ключ → хэш опубликованной версии.
+    /// Именно хэш, а не просто факт публикации — иначе не узнать, что версия
+    /// на диске стала лучше той, что читают коллеги.
+    static func publishedState() async throws -> [String: String] {
         // Спрашиваем саму таблицу, а не вью: её имя задаёт пользователь, и
         // угадывать имя вью подстановкой строки — прямой путь к мусору в запросе.
-        let sql = "SELECT meeting_key FROM \(DBConfig.table) FINAL "
+        let sql = "SELECT meeting_key, content_hash FROM \(DBConfig.table) FINAL "
             + "WHERE uploaded_by = currentUser() AND deleted = 0 FORMAT TSV"
         let text = try await CH.run(sql)
-        return Set(text.split(separator: "\n").map(String.init))
+        var out: [String: String] = [:]
+        for line in text.split(separator: "\n") {
+            let parts = line.split(separator: "\t", omittingEmptySubsequences: false)
+            if let k = parts.first { out[String(k)] = parts.count > 1 ? String(parts[1]) : "" }
+        }
+        return out
     }
 
     static func push(_ item: MeetingItem) async throws {
-        let body = try String(contentsOf: item.session.appendingPathComponent("transcript.md"),
-                              encoding: .utf8)
-        try await insert(item: item, body: body, deleted: 0)
+        try await insert(item: item, body: transcriptText(item.session), deleted: 0)
     }
 
     /// Откат — не DELETE, а новая версия с флагом. Вью её не показывает.
@@ -87,10 +126,13 @@ enum TranscriptStore {
             "started_at": f.string(from: item.startedAt == .distantPast ? Date() : item.startedAt),
             "body": body,
             "deleted": deleted,
+            "content_hash": deleted == 1 ? "" : contentHash(body),
+            "attendees": attendees(item.session),
+            "speakers": deleted == 1 ? [] : speakers(in: body),
         ]
         let json = try JSONSerialization.data(withJSONObject: row, options: [])
-        let sql = "INSERT INTO \(DBConfig.table) "
-            + "(meeting_key, title, started_at, body, deleted) FORMAT JSONEachRow"
+        let sql = "INSERT INTO \(DBConfig.table) (meeting_key, title, started_at, body, "
+            + "deleted, content_hash, attendees, speakers) FORMAT JSONEachRow"
         _ = try await CH.run(sql, body: json)
     }
 }
@@ -102,6 +144,7 @@ final class TranscriptsModel: ObservableObject {
     @Published var items: [MeetingItem] = []
     @Published var error: String?
     @Published var loading = false
+    @Published var staleUpdated = 0   // сколько устаревших версий догнали в базе
 
     func load() {
         items = TranscriptStore.localMeetings()
@@ -113,13 +156,33 @@ final class TranscriptsModel: ObservableObject {
         error = nil
         Task {
             do {
-                let keys = try await TranscriptStore.publishedKeys()
-                for i in items.indices { items[i].published = keys.contains(items[i].id) }
+                let state = try await TranscriptStore.publishedState()
+                for i in items.indices { items[i].published = state[items[i].id] != nil }
+                await refreshStale(state)
             } catch {
                 self.error = error.localizedDescription
             }
             loading = false
         }
+    }
+
+    /// Догоняем базу: если транскрипт на диске стал лучше (появились имена),
+    /// обновляем УЖЕ опубликованные встречи. Согласие человека дано на встречу,
+    /// а не на конкретную редакцию текста, поэтому уточнение имён не требует
+    /// нового подтверждения. Неопубликованные не трогаем никогда.
+    private func refreshStale(_ state: [String: String]) async {
+        var updated = 0
+        for item in items where item.published {
+            let local = TranscriptStore.contentHash(TranscriptStore.transcriptText(item.session))
+            guard let remote = state[item.id], !remote.isEmpty, remote != local else { continue }
+            do {
+                try await TranscriptStore.push(item)
+                updated += 1
+            } catch {
+                self.error = "не удалось обновить «\(item.title)»: \(error.localizedDescription)"
+            }
+        }
+        if updated > 0 { staleUpdated = updated }
     }
 
     func toggle(_ item: MeetingItem, to on: Bool) {
@@ -160,6 +223,12 @@ struct TranscriptsView: View {
             Text("Тумблер = встреча в общей базе отдела. Выключишь — уберётся оттуда.")
                 .font(.caption2).foregroundStyle(.secondary)
 
+            // Молчаливое обновление — плохо: человек должен видеть, что база
+            // догнала диск (например, после того как голоса получили имена).
+            if model.staleUpdated > 0 {
+                Text("Обновлено в базе: \(model.staleUpdated) — появились имена спикеров")
+                    .font(.caption).foregroundStyle(.green)
+            }
             if let e = model.error {
                 Text(e).font(.caption).foregroundStyle(.red).lineLimit(3)
             }
