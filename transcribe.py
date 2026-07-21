@@ -303,6 +303,38 @@ def prettify_speaker(label: str) -> str:
     return label
 
 
+def own_speech_intervals(mic: Path, hf_token: str, owner_vec: list[float],
+                         ) -> list[tuple[float, float]] | None:
+    """Интервалы микрофонной дорожки, где говорит ИМЕННО владелец.
+
+    Без наушников микрофон ловит и собеседников из колонок, и их реплики
+    подписываются «Я» (реальный случай: 413 чужих фраз при выключенном
+    микрофоне). Отличить можно по пути звука: владелец говорит в микрофон
+    напрямую, остальные приходят через «динамик → комната → микрофон», и этот
+    путь ломает тембр. Замерено на живой встрече: голос коллеги через колонки
+    совпадает со своим же чистым отпечатком лишь на 0.52, владелец — на 0.95.
+
+    Возвращает None, если владельца в дорожке не нашли: тогда лучше оставить
+    всё как есть, чем вырезать реплики вслепую.
+    """
+    import voiceprints as vp
+
+    turns, vecs = diarize(mic, hf_token)
+    if not vecs:
+        return None
+    own = {l for l, v in vecs.items() if vp.cosine(v, owner_vec) >= vp.MATCH_THRESHOLD}
+    if not own:
+        print("  владелец в микрофоне не опознан — реплики «Я» оставлены как есть")
+        return None
+    return [(b, e) for b, e, l in turns if l in own]
+
+
+def _in_intervals(start: float, end: float, iv: list[tuple[float, float]]) -> bool:
+    """Центр сегмента попадает в один из интервалов владельца."""
+    c = (start + end) / 2
+    return any(b <= c <= e for b, e in iv)
+
+
 def resolve_speaker_names(turns: list[tuple[float, float, str]],
                           vecs: dict[str, list[float]],
                           meta: dict) -> dict[str, str]:
@@ -357,8 +389,29 @@ def build_transcript(session: Path, model_name: str, language: str | None,
 
     if mic.exists():
         print("Транскрипция микрофона:")
-        for s, e, txt in transcribe_track(repo, mic, language):
+        mic_segs = transcribe_track(repo, mic, language)
+
+        # Оставляем в «Я» только то, что действительно сказал владелец.
+        # Работает, если его голос уже есть в библиотеке (см. owner.py).
+        own_iv = None
+        hf = os.environ.get("HF_TOKEN", "")
+        if do_diarize and hf:
+            import voiceprints as vp
+            others = set(meta.get("others") or [])
+            me = next((a for a in meta.get("attendees", []) if a not in others), None)
+            lib = vp.load()
+            if me and me in lib:
+                own_iv = own_speech_intervals(mic, hf, lib[me]["vec"])
+
+        dropped = 0
+        for s, e, txt in mic_segs:
+            if own_iv is not None and not _in_intervals(s, e, own_iv):
+                dropped += 1
+                continue
             segments.append(Segment(s, e, txt, "Я"))
+        if dropped:
+            print(f"  отсеяно чужих реплик из микрофона: {dropped} "
+                  f"(осталось {len(mic_segs) - dropped})")
 
     if system.exists():
         print("Транскрипция системного звука:")

@@ -133,9 +133,16 @@ enum TranscriptStore {
         try await insert(item: item, body: bodyForSharing(item.session), deleted: 0)
     }
 
-    /// Откат — не DELETE, а новая версия с флагом. Вью её не показывает.
+    /// Удаление из общей базы — НАСТОЯЩЕЕ, физическое.
+    ///
+    /// Раньше здесь была пометка «удалено»: запись пропадала из вью, но текст
+    /// оставался в таблице и читался любым, кто заглянет в неё напрямую.
+    /// Проверено на живой базе — после «удаления» фраза всё ещё доставалась
+    /// запросом. Для сценария «сказал лишнее и хочу убрать» это не удаление,
+    /// а иллюзия, поэтому теперь мутация, которая стирает все версии записи.
     static func unpush(_ item: MeetingItem) async throws {
-        try await insert(item: item, body: "", deleted: 1)
+        let key = item.id.replacingOccurrences(of: "'", with: "\\'")
+        _ = try await CH.run("ALTER TABLE \(DBConfig.table) DELETE WHERE meeting_key = '\(key)'")
     }
 
     private static func insert(item: MeetingItem, body: String, deleted: Int) async throws {
@@ -241,7 +248,8 @@ struct TranscriptsView: View {
                 Spacer()
                 Button("Обновить") { model.load() }.font(.caption)
             }
-            Text("Тумблер = встреча в общей базе отдела. Выключишь — уберётся оттуда.")
+            Text("Тумблер = встреча в общей базе отдела. Выключишь — запись оттуда "
+                 + "удаляется полностью; локальный файл остаётся, опубликовать можно снова.")
                 .font(.caption2).foregroundStyle(.secondary)
 
             // Молчаливое обновление — плохо: человек должен видеть, что база
