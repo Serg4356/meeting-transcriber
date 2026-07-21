@@ -269,6 +269,9 @@ final class AppModel: ObservableObject {
             if ok || FileManager.default.fileExists(
                 atPath: session.appendingPathComponent("transcript.md").path) {
                 lastTranscript = TranscribeRunner.saveToDocuments(session: session, title: title)
+                // Пополняем библиотеку голосов на свежих данных — со временем
+                // приложение начинает отличать владельца от эха само.
+                TranscribeRunner.updateVoiceLibrary()
             } else {
                 Log.write("TRANSCRIBE FAILED: \(session.lastPathComponent)")
             }
@@ -297,6 +300,38 @@ enum TranscribeRunner {
 
     /// Папка с готовыми транскриптами (человекочитаемая). Меняется в настройках.
     static var transcriptsDir: URL { AppPaths.transcriptsDir }
+
+    /// Пополняет библиотеку голосов: определяет, какой голос принадлежит
+    /// владельцу этого Mac, и вносит его под именем из календаря.
+    ///
+    /// Нужно, чтобы отличать реплики владельца от собеседников, попавших в
+    /// микрофон из колонок. Запускается после расшифровки, в фоне и с низким
+    /// приоритетом: диаризация нескольких встреч — дорогая операция, но она
+    /// кэшируется, поэтому каждый следующий запуск считает только новую запись.
+    static func updateVoiceLibrary() {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/sbin/taskpolicy")
+        // Папку записей передаём явно: пользователь мог сменить её в настройках,
+        // а дефолт внутри скрипта об этом не знает.
+        proc.arguments = ["-b", AppPaths.python, AppPaths.script("owner.py"),
+                          "--enroll", "--dir", AppPaths.recordingsDir.path]
+        proc.currentDirectoryURL = URL(fileURLWithPath: AppPaths.projectRoot)
+        proc.environment = AppPaths.childEnvironment
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = pipe
+        do { try proc.run() } catch {
+            Log.write("VOICE-LIB start failed: \(error)")
+            return
+        }
+        DispatchQueue.global().async {
+            let data = (try? pipe.fileHandleForReading.readToEnd()) ?? Data()
+            proc.waitUntilExit()
+            let tail = String(data: data, encoding: .utf8)?
+                .split(separator: "\n").suffix(2).joined(separator: " | ") ?? ""
+            Log.write("VOICE-LIB done (код \(proc.terminationStatus)): \(tail)")
+        }
+    }
 
     /// Запускает live_transcribe.py на время записи (читает растущие .caf).
     /// Возвращает процесс — на «Стоп» ему ставят маркер .stopped и ждут выхода.
