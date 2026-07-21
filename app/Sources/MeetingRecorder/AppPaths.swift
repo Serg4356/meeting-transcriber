@@ -41,7 +41,34 @@ enum AppPaths {
         return env
     }
 
+    /// Куда складываем записи встреч.
+    ///
+    /// ВАЖНО: пользовательские данные не должны лежать внутри папки с кодом.
+    /// Раньше это был `<projectRoot>/mac-capture/recordings`, то есть архив
+    /// записей оказывался там, откуда ставили приложение (например в Загрузках),
+    /// и умирал вместе с чисткой папки или переустановкой.
+    /// Теперь — видимая папка в Documents, меняется в настройках.
+    static let recordingsDirKey = "recordingsDir"
+
+    static var defaultRecordingsDir: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Documents/Meeting Transcriber/Записи")
+    }
+
     static var recordingsDir: URL {
+        if let p = UserDefaults.standard.string(forKey: recordingsDirKey), !p.isEmpty {
+            return URL(fileURLWithPath: (p as NSString).expandingTildeInPath)
+        }
+        return defaultRecordingsDir
+    }
+
+    static func setRecordingsDir(_ url: URL) {
+        UserDefaults.standard.set(url.path, forKey: recordingsDirKey)
+    }
+
+    /// Прежнее место внутри папки с кодом — показываем в настройках, если там
+    /// остались старые сессии, чтобы человек не потерял архив.
+    static var legacyRecordingsDir: URL {
         URL(fileURLWithPath: "\(projectRoot)/mac-capture/recordings")
     }
 

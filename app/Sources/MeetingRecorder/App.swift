@@ -8,9 +8,12 @@ import SwiftUI
 
 @MainActor
 final class AppModel: ObservableObject {
-    enum Phase { case idle, recording, transcribing }
+    // Фаза — ТОЛЬКО про захват звука. Расшифровка живёт отдельно (bgJobs) и
+    // никогда не блокирует старт следующей записи: встречи бывают стык в стык.
+    enum Phase { case idle, recording }
 
     @Published var phase: Phase = .idle
+    @Published var bgJobs: Int = 0          // сколько расшифровок крутится фоном
     @Published var status: String = "Готов к записи"
     @Published var lastTranscript: URL?
     @Published var nextMeeting: Meeting?
@@ -29,6 +32,11 @@ final class AppModel: ObservableObject {
     // --- Запись/календарь UI ---
     private let recControl = RecordingControlController()
     private let popup = MeetingPopupController()
+    private let settings = SettingsController()
+    private let transcripts = TranscriptsController()
+
+    func openSettings() { settings.show() }
+    func openTranscripts() { transcripts.show() }
     private var calendarTimer: Timer?
     private var alertedIDs = Set<String>()
     private let leadMinutes = 1.0  // за сколько минут до встречи показать всплывашку
@@ -102,9 +110,8 @@ final class AppModel: ObservableObject {
 
     var menuIcon: String {
         switch phase {
-        case .idle: return "record.circle"
         case .recording: return "record.circle.fill"
-        case .transcribing: return "waveform"
+        case .idle: return bgJobs > 0 ? "waveform" : "record.circle"
         }
     }
 
@@ -116,7 +123,6 @@ final class AppModel: ObservableObject {
         switch phase {
         case .idle: startRecording()
         case .recording: stopRecording()
-        case .transcribing: break
         }
     }
 
@@ -195,49 +201,70 @@ final class AppModel: ObservableObject {
         stopElapsedTimer()
         recControl.close()
         Log.write("STOP requested")
+        // Контекст встречи забираем в локальные переменные и СРАЗУ освобождаем слоты —
+        // следующая запись может стартовать, пока эта ещё расшифровывается.
+        let session = lastSession
+        let title = activeMeetingTitle
+        let proc = liveProc
+        lastSession = nil
+        activeMeetingTitle = nil
+        liveProc = nil
         Task {
             do {
                 try await recorder.stop()
                 Log.write("STOP done — capture torn down")
-                if let session = lastSession {
-                    finalize(session: session)
-                } else {
-                    phase = .idle
-                }
             } catch {
-                phase = .idle
+                Log.write("STOP FAILED: \(error)")
                 status = "Ошибка остановки: \(error.localizedDescription)"
+            }
+            phase = .idle   // захват свободен — новую встречу можно писать немедленно
+            if let session {
+                finalize(session: session, title: title, proc: proc)
+            } else {
+                updateIdleStatus()
             }
         }
     }
 
-    /// После «Стоп»: ставим маркер, ждём финализацию live-воркера (текст уже
-    /// накоплен по чанкам — остаётся диаризация), сохраняем в Documents.
-    private func finalize(session: URL) {
-        phase = .transcribing
-        status = "Финализирую (диаризация)…"
+    /// Фоновая финализация: маркер .stopped → ждём live-воркер (текст уже накоплен
+    /// по чанкам, остаётся диаризация) → сохраняем в Documents.
+    /// НЕ трогает `phase`: в это время уже может идти запись следующей встречи.
+    private func finalize(session: URL, title: String?, proc: Process?) {
+        bgJobs += 1
+        updateIdleStatus()
+        // название встречи кладём рядом с записью — иначе в списке «Мои встречи»
+        // и в общей базе будут голые таймстемпы вместо человеческих имён.
+        if let title, !title.isEmpty {
+            try? title.write(to: session.appendingPathComponent("title.txt"),
+                             atomically: true, encoding: .utf8)
+        }
         // маркер остановки для live_transcribe.py
         try? "stop".write(to: session.appendingPathComponent(".stopped"),
                           atomically: true, encoding: .utf8)
-        let proc = liveProc
         Task {
             let ok = await Task.detached { () -> Bool in
                 if let proc { proc.waitUntilExit(); return proc.terminationStatus == 0 }
                 // воркера нет (напр. запущено не тем путём) — фолбэк на whole-file
                 return TranscribeRunner.run(session: session).isSuccess
             }.value
-            liveProc = nil
             if ok || FileManager.default.fileExists(
                 atPath: session.appendingPathComponent("transcript.md").path) {
-                let dest = TranscribeRunner.saveToDocuments(session: session,
-                                                            title: activeMeetingTitle)
-                lastTranscript = dest
-                status = dest.map { "Готово: \($0.lastPathComponent)" }
-                    ?? "Готово (файл в папке записи)"
+                lastTranscript = TranscribeRunner.saveToDocuments(session: session, title: title)
             } else {
-                status = "Ошибка транскрипции (см. лог)"
+                Log.write("TRANSCRIBE FAILED: \(session.lastPathComponent)")
             }
-            phase = .idle
+            bgJobs -= 1
+            updateIdleStatus()
+        }
+    }
+
+    /// Статус вне записи: показываем, сколько расшифровок ещё крутится фоном.
+    private func updateIdleStatus() {
+        guard phase != .recording else { return }
+        if bgJobs > 0 {
+            status = bgJobs == 1 ? "Фоном: расшифровка…" : "Фоном: расшифровок \(bgJobs)"
+        } else {
+            status = lastTranscript.map { "Готово: \($0.lastPathComponent)" } ?? "Готов к записи"
         }
     }
 }
@@ -352,7 +379,7 @@ struct ContentView: View {
             }
 
             HStack(spacing: 6) {
-                if model.phase == .transcribing {
+                if model.bgJobs > 0 {
                     ProgressView().controlSize(.small)
                 }
                 Text(model.status)
@@ -361,13 +388,13 @@ struct ContentView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            // Кнопка НИКОГДА не блокируется фоновой расшифровкой — встречи стык в стык.
             Button(action: model.toggleRecording) {
                 Label(model.isRecording ? "Стоп" : "Запись",
                       systemImage: model.isRecording ? "stop.fill" : "record.circle")
                     .frame(maxWidth: .infinity)
             }
             .controlSize(.large)
-            .disabled(model.phase == .transcribing)
 
             if let dest = model.lastTranscript {
                 Button {
@@ -404,6 +431,14 @@ struct ContentView: View {
                 get: { model.launchAtLogin },
                 set: { model.setLaunchAtLogin($0) }))
                 .toggleStyle(.checkbox)
+                .font(.caption)
+
+            Button("Мои встречи…") { model.openTranscripts() }
+                .buttonStyle(.borderless)
+                .font(.caption)
+
+            Button("Настройки…") { model.openSettings() }
+                .buttonStyle(.borderless)
                 .font(.caption)
 
             Button("Выход") { NSApplication.shared.terminate(nil) }

@@ -18,7 +18,6 @@ pyannote/speaker-diarization-community-1 на Hugging Face. Без токена 
 from __future__ import annotations
 
 import argparse
-import difflib
 import os
 import re
 import subprocess
@@ -196,30 +195,64 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", text.lower())).strip()
 
 
-def dedupe_bleed(segments: list["Segment"], time_tol: float = 4.0,
-                 sim_threshold: float = 0.7) -> list["Segment"]:
+def dedupe_bleed(segments: list["Segment"], time_tol: float = 10.0,
+                 contain_threshold: float = 0.6,
+                 echo_session_ratio: float = 0.5,
+                 overlap_tol: float = 2.0) -> list["Segment"]:
     """Убирает протечку системного звука в микрофон (эхо из динамиков без наушников).
 
-    Если реплика 'Я' почти дословно совпадает с системной репликой в близком
-    интервале — это тот же звук, пойманный микрофоном. Дропаем микрофонный дубль
-    (чистый источник собеседников — системная дорожка).
+    Опора на физику, а не на эвристику: СВОЙ голос никогда не попадает в системную
+    дорожку — конференция не проигрывает тебя тебе же. Значит любой текст микрофона,
+    который звучит и в системной дорожке рядом по времени, — это эхо из динамиков,
+    а не твоя речь. Удалять такое безопасно: настоящие реплики совпасть не могут.
+
+    Сравниваем по ДОЛЕ общих слов, а не по схожести строк целиком: whisper режет
+    две дорожки на сегменты по-разному, и эхо приходит со сдвигом 1-4 секунды,
+    поэтому посегментное сравнение промахивается (реальный случай: 413 чужих
+    реплик, помеченных как «Я», при выключенном микрофоне).
     """
     system_segs = [s for s in segments if s.speaker != "Я"]
-    if not system_segs:
+    mic_total = sum(1 for s in segments if s.speaker == "Я")
+    if not system_segs or not mic_total:
         return segments
+
+    # Проход 1: эхо, которое расслышано так же, как оригинал — ловим по словам.
     kept: list[Segment] = []
     dropped = 0
     for seg in segments:
         if seg.speaker == "Я":
-            n = _norm(seg.text)
-            if n and any(
-                abs(sys.start - seg.start) <= time_tol
-                and difflib.SequenceMatcher(None, n, _norm(sys.text)).ratio() >= sim_threshold
-                for sys in system_segs
-            ):
-                dropped += 1
-                continue
+            words = set(_norm(seg.text).split())
+            if words:
+                # ponytail: линейный проход по системным сегментам, O(mic*system).
+                # На часовой встрече ~0.6M сравнений множеств — доли секунды.
+                # Бакетизация по времени — если корпус вырастет на порядок.
+                near: set[str] = set()
+                for sys_seg in system_segs:
+                    if abs(sys_seg.start - seg.start) <= time_tol:
+                        near.update(_norm(sys_seg.text).split())
+                if near and len(words & near) / len(words) >= contain_threshold:
+                    dropped += 1
+                    continue
         kept.append(seg)
+
+    # Проход 2 — только если запись явно велась БЕЗ наушников (эхом оказалась
+    # большая часть микрофонной дорожки). Остаток эха whisper расслышал иначе,
+    # чем оригинал (звук из динамиков хуже), поэтому по словам он не ловится.
+    # Но живая речь идёт в ПАУЗАХ чужой (люди говорят по очереди), а эхо звучит
+    # одновременно с ней. На сессиях в наушниках правило не включается вовсе.
+    if dropped / mic_total >= echo_session_ratio:
+        pruned: list[Segment] = []
+        dropped2 = 0
+        for seg in kept:
+            if seg.speaker == "Я" and any(
+                abs(s.start - seg.start) <= overlap_tol for s in system_segs
+            ):
+                dropped2 += 1
+                continue
+            pruned.append(seg)
+        kept, dropped = pruned, dropped + dropped2
+        print(f"  запись велась без наушников — микрофон ловил динамики "
+              f"(эхом оказалось {dropped}/{mic_total} реплик). Наушники это убирают.")
     if dropped:
         print(f"  дедуп: убрано {dropped} микрофонных дублей (эхо из динамиков)")
     return kept

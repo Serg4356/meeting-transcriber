@@ -45,3 +45,32 @@ def test_no_system_track_keeps_all():
         Segment(3.0, 4.0, "ещё микрофон", "Я"),
     ]
     assert len(dedupe_bleed(segs)) == 2
+
+
+def test_echo_with_different_words_removed_when_session_is_echo_dominated():
+    """Без наушников whisper слышит эхо ИНАЧЕ, чем оригинал (звук из динамиков
+    хуже), поэтому по словам оно не ловится. Спасает одновременность: живая речь
+    идёт в паузах чужой, эхо — поверх неё. Реальный случай: 413 чужих реплик,
+    помеченных как «Я», при выключенном микрофоне."""
+    segs = []
+    for i in range(8):  # явные дубли → сессия опознаётся как «без наушников»
+        t = i * 10.0
+        segs.append(Segment(t, t + 2, f"обсуждаем пункт номер {i} подробно", "Собеседник 1"))
+        segs.append(Segment(t + 0.5, t + 2.5, f"обсуждаем пункт номер {i} подробно", "Я"))
+    # искажённое эхо: слова другие, но звучит ОДНОВРЕМЕННО с чужой речью
+    segs.append(Segment(100.0, 102.0, "своевременная приёмка товара", "Собеседник 1"))
+    segs.append(Segment(100.4, 102.4, "который работает на козлов", "Я"))
+
+    kept = dedupe_bleed(segs)
+    assert not [s for s in kept if s.speaker == "Я"]
+
+
+def test_interjection_kept_when_session_is_clean():
+    """В наушниках эха мало — агрессивное правило НЕ включается, и живая
+    перебивка поверх чужой речи остаётся в транскрипте."""
+    segs = [Segment(i * 10.0, i * 10.0 + 2.0, f"чужая реплика номер {i}", "Собеседник 1")
+            for i in range(8)]
+    segs.append(Segment(20.5, 21.0, "да согласен полностью", "Я"))
+
+    kept = dedupe_bleed(segs)
+    assert [s for s in kept if s.speaker == "Я"], "чистую сессию трогать нельзя"

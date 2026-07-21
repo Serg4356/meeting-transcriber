@@ -36,6 +36,12 @@ enum RenderShots {
                                               title: nil, at: NSPoint(x: 480, y: 520))))
         windows.append(("pill", makeWindow(RecordingControlView(model: model, onStop: {}),
                                               title: nil, at: NSPoint(x: 480, y: 300))))
+        windows.append(("meetings", makeWindow(TranscriptsView(),
+                                              title: "Мои встречи",
+                                              at: NSPoint(x: 820, y: 700))))
+        windows.append(("settings", makeWindow(SettingsView(),
+                                              title: "Настройки",
+                                              at: NSPoint(x: 820, y: 300))))
 
         heldWindows = windows
         // даём окнам отрисоваться, снимаем статичные PNG, потом — кадры для gif плашки
