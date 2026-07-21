@@ -13,3 +13,4 @@ credentials.json
 app/logo.svg.png
 *.log
 .pytest_cache/
+name_aliases.json

@@ -303,6 +303,35 @@ def prettify_speaker(label: str) -> str:
     return label
 
 
+def apply_name_hints(segments: list["Segment"], meta: dict) -> list["Segment"]:
+    """Заменяет «Собеседник N» на имя, если оно уверенно вытекает из текста.
+
+    Голосовая библиотека знает только тех, чей отпечаток снят. Остальных часто
+    можно опознать по обращениям: к человеку зовут по имени, и он отвечает
+    следующим. Привязка делается только при явном перевесе одного имени —
+    иначе метка остаётся безымянной (см. name_hints).
+    """
+    import name_hints as nh
+
+    aliases = nh.load_aliases(Path(__file__).parent)
+    names = list(aliases) or [a.split()[-1] for a in meta.get("attendees", [])]
+    if not names:
+        return segments
+
+    pairs = [(s.speaker, s.text) for s in segments]
+    decided = nh.decide(nh.score(pairs, names))
+    if not decided:
+        return segments
+
+    mapping = {c: aliases.get(n, n) for c, (n, _) in decided.items()}
+    for seg in segments:
+        if seg.speaker in mapping:
+            seg.speaker = mapping[seg.speaker]
+    print(f"  опознаны по обращениям: "
+          + ", ".join(f"{c} → {n}" for c, n in mapping.items()))
+    return segments
+
+
 def own_speech_intervals(mic: Path, hf_token: str, owner_vec: list[float],
                          ) -> list[tuple[float, float]] | None:
     """Интервалы микрофонной дорожки, где говорит ИМЕННО владелец.
@@ -445,6 +474,10 @@ def build_transcript(session: Path, model_name: str, language: str | None,
     if dedupe:
         segments = dedupe_bleed(segments)
     segments.sort(key=lambda x: x.start)
+
+    # Кого не узнала библиотека голосов — пробуем опознать по обращениям в
+    # тексте («Фёдор, ты с нами?» → отвечает Фёдор). Только уверенные случаи.
+    segments = apply_name_hints(segments, meta)
 
     out = session / "transcript.md"
     title = meta.get("title") or session.name
