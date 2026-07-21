@@ -185,7 +185,7 @@ struct SettingsView: View {
             }
 
             Section("Выгрузка в общую базу") {
-                TextField("Хост", text: $host, prompt: Text("clickhouse.internal"))
+                TextField("Хост", text: $host, prompt: Text("clickhouse.example.com"))
                 TextField("Пользователь", text: $user, prompt: Text("логин"))
                 SecureField("Пароль", text: $password, prompt: Text("хранится в Keychain"))
                 TextField("Таблица", text: $table, prompt: Text("схема.таблица"))
