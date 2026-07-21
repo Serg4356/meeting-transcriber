@@ -104,6 +104,11 @@ def upcoming(within_min: int, require_link: bool) -> list[dict]:
         attendees = [a for a in ev.get("attendees", []) if not a.get("resource")]
         names = [a.get("displayName") or a.get("email", "") for a in attendees]
         accepted = sum(1 for a in attendees if a.get("responseStatus") == "accepted")
+        # Кто на встрече КРОМЕ меня. Нужно для авто-разметки голосов: если в
+        # списке остался ровно один человек, то единственный чужой голос на
+        # записи принадлежит ему — разметка получается без ручной работы.
+        others = [a.get("displayName") or a.get("email", "")
+                  for a in attendees if not a.get("self")]
         result.append({
             "id": ev.get("id"),
             "title": ev.get("summary", "(без названия)"),
@@ -112,6 +117,7 @@ def upcoming(within_min: int, require_link: bool) -> list[dict]:
             "meeting_url": url,
             "attendees": [n for n in names if n],
             "accepted_count": accepted,
+            "others": [n for n in others if n],
         })
     return result
 

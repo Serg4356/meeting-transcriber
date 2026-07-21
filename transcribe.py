@@ -151,8 +151,10 @@ def transcribe_track(repo: str, path: Path,
 
 def diarize(path: Path, hf_token: str,
             num_speakers: int | None = None,
-            max_speakers: int | None = None) -> list[tuple[float, float, str]]:
-    """Возвращает список (start, end, speaker_label) турнов диаризации.
+            max_speakers: int | None = None
+            ) -> tuple[list[tuple[float, float, str]], dict[str, list[float]]]:
+    """Возвращает (турны, отпечатки): список (start, end, speaker_label) и
+    вектор голоса на каждую метку — по ним спикер узнаётся в других встречах.
 
     num_speakers: точное число говорящих, если оно достоверно известно.
     max_speakers: верхняя граница. Именно её стоит брать из календаря —
@@ -185,7 +187,18 @@ def diarize(path: Path, hf_token: str,
              for t, _, spk in annotation.itertracks(yield_label=True)]
     n_speakers = len({spk for _, _, spk in turns})
     print(f"  диаризация: {len(turns)} турнов, {n_speakers} спикер(ов)")
-    return turns
+
+    # Голосовые отпечатки: pyannote отдаёт по одному вектору на метку, порядок
+    # строк совпадает с annotation.labels() (проверено на 4.0.7).
+    vecs: dict[str, list[float]] = {}
+    emb = getattr(dia, "speaker_embeddings", None)
+    if emb is not None:
+        labels = annotation.labels()
+        if len(emb) == len(labels):
+            vecs = {lbl: [float(x) for x in emb[i]] for i, lbl in enumerate(labels)}
+        else:
+            print("  эмбеддинги не совпали с метками — отпечатки пропущены")
+    return turns, vecs
 
 
 def assign_speaker(seg_start: float, seg_end: float,
@@ -290,6 +303,46 @@ def prettify_speaker(label: str) -> str:
     return label
 
 
+def resolve_speaker_names(turns: list[tuple[float, float, str]],
+                          vecs: dict[str, list[float]],
+                          meta: dict) -> dict[str, str]:
+    """Метка SPEAKER_xx → имя человека, если голос узнан по библиотеке.
+
+    Заодно пополняет библиотеку: встреча на двоих даёт разметку бесплатно —
+    единственный чужой голос принадлежит единственному человеку в приглашении
+    кроме меня. Ручной разметки не требуется вообще.
+    """
+    if not turns or not vecs:
+        return {}
+    import voiceprints as vp
+
+    speech: dict[str, float] = {}
+    for s, e, lbl in turns:
+        speech[lbl] = speech.get(lbl, 0.0) + (e - s)
+
+    lib = vp.load()
+    labels = list(vecs)
+    others = meta.get("others") or []
+
+    # Бесплатная разметка с 1:1 — но только если всё сошлось (см. can_enroll):
+    # если на «встрече на двоих» голосов оказалось больше, значит подключился
+    # кто-то ещё, и запоминать нельзя — ошибочный отпечаток не отследить.
+    if vp.can_enroll(others, len(labels), speech.get(labels[0], 0.0) if labels else 0.0):
+        who = others[0]
+        vp.save(vp.enroll(lib, who, vecs[labels[0]]))
+        print(f"  голос запомнен: {who} (встреча на двоих)")
+        return {labels[0]: who}
+
+    names: dict[str, str] = {}
+    for lbl, vec in vecs.items():
+        who, _score = vp.match(lib, vec)
+        if who:
+            names[lbl] = who
+    if names:
+        print(f"  узнаны по голосу: {', '.join(sorted(set(names.values())))}")
+    return names
+
+
 def build_transcript(session: Path, model_name: str, language: str | None,
                      do_diarize: bool, num_speakers: int | None = None,
                      dedupe: bool = True) -> Path:
@@ -311,6 +364,7 @@ def build_transcript(session: Path, model_name: str, language: str | None,
         print("Транскрипция системного звука:")
         sys_segs = transcribe_track(repo, system, language)
         turns: list[tuple[float, float, str]] = []
+        vecs: dict[str, list[float]] = {}
         hf_token = os.environ.get("HF_TOKEN", "")
         if do_diarize and hf_token:
             print("Диаризация системного звука:")
@@ -320,13 +374,19 @@ def build_transcript(session: Path, model_name: str, language: str | None,
             if cap and not num_speakers:
                 print(f"  подтвердили приглашение: {cap} → верхняя граница спикеров")
             try:
-                turns = diarize(system, hf_token, num_speakers, max_speakers=cap)
+                turns, vecs = diarize(system, hf_token, num_speakers, max_speakers=cap)
             except Exception as e:  # noqa: BLE001 — не терять транскрипт из-за сбоя диаризации
                 print(f"  диаризация не удалась ({e}) — реплики пойдут как «Собеседник»")
         elif do_diarize and not hf_token:
             print("  HF_TOKEN не задан — диаризация пропущена (см. README).")
+
+        names = resolve_speaker_names(turns, vecs, meta)
         for s, e, txt in sys_segs:
-            spk = prettify_speaker(assign_speaker(s, e, turns)) if turns else "Собеседник"
+            if turns:
+                lbl = assign_speaker(s, e, turns)
+                spk = names.get(lbl) or prettify_speaker(lbl)
+            else:
+                spk = "Собеседник"
             segments.append(Segment(s, e, txt, spk))
 
     if dedupe:

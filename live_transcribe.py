@@ -21,7 +21,8 @@ from pathlib import Path
 import capability
 from transcribe import (
     MLX_REPOS, Segment, assign_speaker, dedupe_bleed, diarize, hhmmss,
-    load_env, prettify_speaker, _is_hallucination,
+    load_env, load_meeting_meta, prettify_speaker, resolve_speaker_names,
+    _is_hallucination,
 )
 
 REPO = "mlx-community/whisper-large-v3-mlx"  # переопределяется в main() под железо
@@ -117,29 +118,44 @@ def _write_partial(session: Path, mic: list, system: list) -> None:
 
 
 def _finalize(session: Path, mic: list, system: list) -> None:
-    """Диаризация полного system.caf + мерж + дедуп → transcript.md."""
+    """Диаризация полного system.caf + мерж + дедуп → transcript.md.
+
+    Это основной путь: именно им пользуется приложение, поэтому шапка с
+    участниками, верхняя граница спикеров и узнавание голосов живут здесь.
+    """
     import os
     segments: list[Segment] = [Segment(s, e, t, "Я") for s, e, t in mic]
+    meta = load_meeting_meta(session)
 
     turns: list[tuple[float, float, str]] = []
+    vecs: dict[str, list[float]] = {}
     hf_token = os.environ.get("HF_TOKEN", "")
     sys_path = session / "system.caf"
     if hf_token and sys_path.exists() and _duration(sys_path) > 1:
         print("Финал: диаризация…")
+        # Верхняя граница из календаря: подтвердивших больше, чем говоривших.
+        cap = meta.get("accepted_count") or None
         try:
-            turns = diarize(sys_path, hf_token)
+            turns, vecs = diarize(sys_path, hf_token, max_speakers=cap)
         except Exception as e:  # noqa: BLE001
             print(f"  диаризация не удалась: {e}")
 
+    names = resolve_speaker_names(turns, vecs, meta)
     for s, e, t in system:
-        spk = prettify_speaker(assign_speaker(s, e, turns)) if turns else "Собеседник"
+        if turns:
+            lbl = assign_speaker(s, e, turns)
+            spk = names.get(lbl) or prettify_speaker(lbl)
+        else:
+            spk = "Собеседник"
         segments.append(Segment(s, e, t, spk))
 
     segments = dedupe_bleed(segments)
     segments.sort(key=lambda x: x.start)
 
     out = session / "transcript.md"
-    lines = [f"# Транскрипт встречи — {session.name}\n"]
+    lines = [f"# Транскрипт встречи — {meta.get('title') or session.name}\n"]
+    if meta.get("attendees"):
+        lines.append("**Участники:** " + ", ".join(meta["attendees"]) + "\n")
     for sg in segments:
         lines.append(f"**[{hhmmss(sg.start)}] {sg.speaker}:** {sg.text}")
     out.write_text("\n\n".join(lines) + "\n", encoding="utf-8")
