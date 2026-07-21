@@ -11,6 +11,20 @@ import SwiftUI
 enum RenderShots {
     @MainActor static var heldWindows: [(String, NSWindow)] = []
     @MainActor static var gifFrame = 0
+    // Настоящие пути пользователя, подменённые на время рендера.
+    // Восстанавливаем ПЕРЕД выходом: рендер асинхронный, и defer
+    // отработал бы раньше, чем снимутся кадры (так и было).
+    @MainActor static var savedRecordingsDir: String?
+    @MainActor static var savedTranscriptsDir: String?
+
+    @MainActor
+    static func restorePaths() {
+        let d = UserDefaults.standard
+        if let v = savedRecordingsDir { d.set(v, forKey: AppPaths.recordingsDirKey) }
+        else { d.removeObject(forKey: AppPaths.recordingsDirKey) }
+        if let v = savedTranscriptsDir { d.set(v, forKey: AppPaths.transcriptsDirKey) }
+        else { d.removeObject(forKey: AppPaths.transcriptsDirKey) }
+    }
 
     @MainActor
     static func run(outputDir: String) {
@@ -19,6 +33,19 @@ enum RenderShots {
 
         // 1) Лого — ImageRenderer (без системных символов, рисуется чисто).
         renderLogo(to: dir.appendingPathComponent("logo.png"))
+
+        // Скриншоты уходят в публичный репозиторий, а окно настроек показывает
+        // РЕАЛЬНЫЕ пути — вместе с именем пользователя macOS. Текстовые гейты
+        // картинку не читают, поэтому утечка проходит незамеченной (так и было:
+        // в опубликованном скриншоте светилось /Users/<имя>/… ).
+        // Подставляем обезличенные пути на время рендера и возвращаем как было.
+        let d = UserDefaults.standard
+        let savedRec = d.string(forKey: AppPaths.recordingsDirKey)
+        let savedTxt = d.string(forKey: AppPaths.transcriptsDirKey)
+        d.set("/Users/user/Documents/Meeting Transcriber/Записи", forKey: AppPaths.recordingsDirKey)
+        d.set("/Users/user/Documents/Транскрипты встреч", forKey: AppPaths.transcriptsDirKey)
+        savedRecordingsDir = savedRec
+        savedTranscriptsDir = savedTxt
 
         // 2) UI — живые окна + screencapture.
         NSApp.setActivationPolicy(.regular)
@@ -58,7 +85,7 @@ enum RenderShots {
     /// SwiftUI-анимация «дышащего» эквалайзера успевает продвигаться между кадрами.
     @MainActor
     private static func captureGifFrames(dir: URL) {
-        guard let pill = heldWindows.first(where: { $0.0 == "pill" })?.1 else { exit(0) }
+        guard let pill = heldWindows.first(where: { $0.0 == "pill" })?.1 else { restorePaths(); exit(0) }
         // светлый непрозрачный фон окна → gif без чёрного (ffmpeg иначе красит альфу в чёрный)
         pill.isOpaque = true
         pill.backgroundColor = NSColor(calibratedRed: 0.93, green: 0.93, blue: 0.95, alpha: 1)
@@ -74,6 +101,7 @@ enum RenderShots {
                 makeGif(framesDir: framesDir, out: dir.appendingPathComponent("pill.gif"))
                 try? FileManager.default.removeItem(at: framesDir)
                 print("→ pill.gif")
+                restorePaths()
                 exit(0)
             }
         }
