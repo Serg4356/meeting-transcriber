@@ -38,6 +38,12 @@ enum AppPaths {
         let brew = "/opt/homebrew/bin:/usr/local/bin"
         let base = env["PATH"].map { $0.isEmpty ? nil : $0 } ?? nil
         env["PATH"] = base.map { "\(brew):\($0)" } ?? "\(brew):/usr/bin:/bin:/usr/sbin:/sbin"
+        // Ключ ЛЛМ из Keychain → окружение Python: transcribe.py по нему (from_env)
+        // локально чистит транскрипт и делает саммари. Нет ключа — только сырой.
+        let key = Keychain.get(account: "llm.key")
+        if !key.isEmpty { env["ANTHROPIC_API_KEY"] = key }
+        let model = UserDefaults.standard.string(forKey: "llm.model") ?? ""
+        if !model.isEmpty { env["CLEAN_MODEL"] = model }
         return env
     }
 

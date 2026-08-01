@@ -44,6 +44,31 @@ final class AppModel: ObservableObject {
     init() {
         refreshLoginStatus()
         startWatchingCalendar()
+        resumeUnfinished()
+    }
+
+    /// После запуска подхватываем сессии с записью, но без транскрипта — приложение
+    /// или машина могли зависнуть посреди расшифровки. Чекпойнты шагов в
+    /// transcribe.py делают повторный прогон дешёвым: уже сделанное не считается
+    /// заново. Аудио на диске durable — данные не теряются, только время пересчёта.
+    /// ponytail: при N незавершённых спавним N расшифровок разом (после сбоя обычно
+    /// одна). Если начнёт копиться — сериализовать через очередь.
+    func resumeUnfinished() {
+        let fm = FileManager.default
+        guard let dirs = try? fm.contentsOfDirectory(
+            at: AppPaths.recordingsDir, includingPropertiesForKeys: nil) else { return }
+        let stems = ["mic", "system"], exts = ["wav", "caf", "m4a", "flac", "aiff"]
+        for session in dirs {
+            let hasAudio = stems.contains { s in exts.contains { e in
+                fm.fileExists(atPath: session.appendingPathComponent("\(s).\(e)").path) } }
+            let done = fm.fileExists(
+                atPath: session.appendingPathComponent("transcript.md").path)
+            guard hasAudio, !done else { continue }
+            let title = try? String(
+                contentsOf: session.appendingPathComponent("title.txt"), encoding: .utf8)
+            Log.write("RESUME: \(session.lastPathComponent) — незавершённая расшифровка")
+            finalize(session: session, title: title, proc: nil)
+        }
     }
 
     /// Инициализация для рендера скриншотов: без таймеров/подпроцессов, с демо-данными.
@@ -278,11 +303,31 @@ final class AppModel: ObservableObject {
                 // Пополняем библиотеку голосов на свежих данных — со временем
                 // приложение начинает отличать владельца от эха само.
                 TranscribeRunner.updateVoiceLibrary()
+                maybeOfferUpload(session: session, title: title)
             } else {
                 Log.write("TRANSCRIBE FAILED: \(session.lastPathComponent)")
             }
             bgJobs -= 1
             updateIdleStatus()
+        }
+    }
+
+    /// После обработки, если БД настроена и очищенная версия готова — спрашиваем
+    /// явно, отправлять ли встречу. Само ничего не уходит (осознанное согласие на
+    /// каждую встречу). В базу идут очищенная версия + саммари, сырой остаётся локально.
+    private func maybeOfferUpload(session: URL, title: String?) {
+        guard DBConfig.isConfigured, TranscriptStore.canPush(session) else { return }
+        let alert = NSAlert()
+        alert.messageText = "Отправить встречу в общую базу?"
+        alert.informativeText = "«\(title ?? session.lastPathComponent)»: в общую базу отдела "
+            + "уйдут очищенная версия и саммари. Сырой транскрипт останется только у вас."
+        alert.addButton(withTitle: "Отправить")
+        alert.addButton(withTitle: "Не сейчас")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        Task {
+            do { try await TranscriptStore.pushSession(session, title: title) }
+            catch { Log.write("UPLOAD FAILED: \(error.localizedDescription)") }
         }
     }
 
@@ -411,10 +456,26 @@ enum TranscribeRunner {
         try? FileManager.default.removeItem(at: dest)
         do {
             try FileManager.default.copyItem(at: src, to: dest)
-            return dest
         } catch {
             return nil
         }
+        // Очищенная версия (без токсичности на людей и приватного) ложится рядом
+        // тем же именем + « — очищено». Есть не всегда: только если очистка
+        // настроена (ключ ЛЛМ) — тогда transcribe.py создаёт transcript.clean.md.
+        let cleanSrc = session.appendingPathComponent("transcript.clean.md")
+        if FileManager.default.fileExists(atPath: cleanSrc.path) {
+            let cleanDest = dir.appendingPathComponent(name + " — очищено.md")
+            try? FileManager.default.removeItem(at: cleanDest)
+            try? FileManager.default.copyItem(at: cleanSrc, to: cleanDest)
+        }
+        // Саммари + action items — тоже рядом, если очистка/саммари настроены.
+        let summarySrc = session.appendingPathComponent("transcript.summary.md")
+        if FileManager.default.fileExists(atPath: summarySrc.path) {
+            let summaryDest = dir.appendingPathComponent(name + " — саммари.md")
+            try? FileManager.default.removeItem(at: summaryDest)
+            try? FileManager.default.copyItem(at: summarySrc, to: summaryDest)
+        }
+        return dest
     }
 
     private static func sanitizeFilename(_ s: String) -> String {

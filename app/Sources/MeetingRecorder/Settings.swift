@@ -70,6 +70,23 @@ enum DBConfig {
     }
 }
 
+// MARK: - Конфиг ЛЛМ (локальная очистка + саммари)
+
+enum LLMConfig {
+    private static let d = UserDefaults.standard
+    /// Ключ живёт в Keychain, как пароль БД — в файлы/UserDefaults не пишем.
+    /// По нему transcribe.py чистит транскрипт и делает саммари на этой машине.
+    static var key: String {
+        get { Keychain.get(account: "llm.key") }
+        set { Keychain.set(newValue, account: "llm.key") }
+    }
+    static var model: String {
+        get { d.string(forKey: "llm.model") ?? "" }
+        set { d.set(newValue, forKey: "llm.model") }
+    }
+    static var isConfigured: Bool { !key.isEmpty }
+}
+
 // MARK: - Клиент ClickHouse (HTTP)
 
 enum CH {
@@ -157,6 +174,8 @@ struct SettingsView: View {
     @State private var user = DBConfig.user
     @State private var table = DBConfig.table
     @State private var password = DBConfig.password
+    @State private var llmKey = LLMConfig.key
+    @State private var llmModel = LLMConfig.model
     @State private var checkResult: String?
     @State private var checking = false
 
@@ -199,13 +218,21 @@ struct SettingsView: View {
                             .lineLimit(2)
                     }
                 }
-                Text("Ничего не выгружается само — только встречи, которые вы отметите "
-                     + "в «Мои встречи…».")
+                Text("Само ничего не уходит. После обработки встречи приложение спросит, "
+                     + "отправлять ли её (уйдут только очищенная версия и саммари, не сырой).")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+
+            Section("Очистка и саммари (локально)") {
+                SecureField("Ключ ЛЛМ", text: $llmKey, prompt: Text("хранится в Keychain"))
+                TextField("Модель", text: $llmModel, prompt: Text("claude-sonnet-5"))
+                Text("Транскрипты чистятся и саммаризируются на вашем Маке этим ключом — "
+                     + "звук и текст никуда не уходят. Без ключа остаётся только сырой транскрипт.")
                     .font(.caption2).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
-        .frame(width: 460, height: 640)
+        .frame(width: 460, height: 700)
     }
 
     /// Есть ли в старом месте РЕАЛЬНЫЕ записи. Скрытые файлы не считаем:
@@ -233,6 +260,8 @@ struct SettingsView: View {
         DBConfig.user = user
         DBConfig.table = table
         DBConfig.password = password
+        LLMConfig.key = llmKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        LLMConfig.model = llmModel.trimmingCharacters(in: .whitespacesAndNewlines)
         checking = true
         checkResult = nil
         Task {

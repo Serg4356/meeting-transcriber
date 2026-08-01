@@ -18,11 +18,80 @@ pyannote/speaker-diarization-community-1 на Hugging Face. Без токена 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+
+# --- Чекпойнт шагов: пережить зависание, не пересчитывая уже сделанное -------
+#
+# Дорогие шаги (ASR каждой дорожки, диаризация) — блокирующие вызовы MLX/pyannote,
+# которые отдают ВСЕ сегменты разом, а не по мере готовности. Значит чекпойнтить
+# можно по ШАГУ, не по сегменту внутри дорожки: результат каждого шага кешируется
+# рядом с сессией. Зависло на диаризации → при перезапуске ASR берётся из кеша.
+# Подпись источника (mtime+size+параметры) инвалидирует кеш, если аудио или модель
+# сменились. Кеш-файлы удаляются после успешной записи transcript.md.
+
+def _src_sig(path: Path, **extra) -> dict:
+    st = path.stat()
+    return {"mtime": st.st_mtime, "size": st.st_size, **extra}
+
+
+def _load_cache(cache: Path, sig: dict):
+    """Данные из кеша, если подпись совпала; иначе None."""
+    if not cache.exists():
+        return None
+    try:
+        blob = json.loads(cache.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    return blob.get("data") if blob.get("sig") == sig else None
+
+
+def _save_cache(cache: Path, sig: dict, data) -> None:
+    # Атомарно: частично записанный при новом зависании кеш не подхватится.
+    tmp = cache.with_name(cache.name + ".tmp")
+    tmp.write_text(json.dumps({"sig": sig, "data": data}), encoding="utf-8")
+    tmp.replace(cache)
+
+
+def _asr_cached(session: Path, tag: str, repo: str, path: Path,
+                language: str | None) -> list[tuple[float, float, str]]:
+    """transcribe_track с чекпойнтом шага (кеш .asr_<tag>.json)."""
+    cache = session / f".asr_{tag}.json"
+    sig = _src_sig(path, repo=repo, lang=language or "")
+    hit = _load_cache(cache, sig)
+    if hit is not None:
+        print(f"  {path.name}: {len(hit)} сегментов из кеша (шаг пропущен)")
+        return [tuple(x) for x in hit]
+    segs = transcribe_track(repo, path, language)
+    _save_cache(cache, sig, segs)
+    return segs
+
+
+def _diar_cached(session: Path, path: Path, hf_token: str,
+                 num_speakers: int | None, max_speakers: int | None
+                 ) -> tuple[list[tuple[float, float, str]], dict[str, list[float]]]:
+    """diarize с чекпойнтом шага (кеш .diar_system.json)."""
+    cache = session / ".diar_system.json"
+    sig = _src_sig(path, num=num_speakers or 0, cap=max_speakers or 0)
+    hit = _load_cache(cache, sig)
+    if hit is not None:
+        print(f"  диаризация из кеша: {len(hit['turns'])} турнов (шаг пропущен)")
+        return [tuple(t) for t in hit["turns"]], dict(hit["vecs"])
+    turns, vecs = diarize(path, hf_token, num_speakers, max_speakers)
+    _save_cache(cache, sig, {"turns": turns, "vecs": vecs})
+    return turns, vecs
+
+
+def _clear_checkpoints(session: Path) -> None:
+    """Убрать кеши шагов после успешной записи транскрипта."""
+    for c in session.glob(".asr_*.json"):
+        c.unlink(missing_ok=True)
+    (session / ".diar_system.json").unlink(missing_ok=True)
 
 
 def mean_volume_db(path: Path) -> float:
@@ -418,7 +487,7 @@ def build_transcript(session: Path, model_name: str, language: str | None,
 
     if mic.exists():
         print("Транскрипция микрофона:")
-        mic_segs = transcribe_track(repo, mic, language)
+        mic_segs = _asr_cached(session, "mic", repo, mic, language)
 
         # Оставляем в «Я» только то, что действительно сказал владелец.
         # Работает, если его голос уже есть в библиотеке (см. owner.py).
@@ -444,7 +513,7 @@ def build_transcript(session: Path, model_name: str, language: str | None,
 
     if system.exists():
         print("Транскрипция системного звука:")
-        sys_segs = transcribe_track(repo, system, language)
+        sys_segs = _asr_cached(session, "system", repo, system, language)
         turns: list[tuple[float, float, str]] = []
         vecs: dict[str, list[float]] = {}
         hf_token = os.environ.get("HF_TOKEN", "")
@@ -456,7 +525,7 @@ def build_transcript(session: Path, model_name: str, language: str | None,
             if cap and not num_speakers:
                 print(f"  подтвердили приглашение: {cap} → верхняя граница спикеров")
             try:
-                turns, vecs = diarize(system, hf_token, num_speakers, max_speakers=cap)
+                turns, vecs = _diar_cached(session, system, hf_token, num_speakers, cap)
             except Exception as e:  # noqa: BLE001 — не терять транскрипт из-за сбоя диаризации
                 print(f"  диаризация не удалась ({e}) — реплики пойдут как «Собеседник»")
         elif do_diarize and not hf_token:
@@ -489,8 +558,47 @@ def build_transcript(session: Path, model_name: str, language: str | None,
     for seg in segments:
         lines.append(f"**[{hhmmss(seg.start)}] {seg.speaker}:** {seg.text}")
     out.write_text("\n\n".join(lines) + "\n", encoding="utf-8")
+    _clear_checkpoints(session)  # успех: кеши шагов больше не нужны
     print(f"\nГотово: {out}  ({len(segments)} реплик)")
+    final_text = out.read_text(encoding="utf-8")
+    _write_clean_copy(session, final_text)
+    _write_summary_copy(session, final_text)
     return out
+
+
+def _write_clean_copy(session: Path, transcript_text: str) -> None:
+    """Рядом с transcript.md кладёт transcript.clean.md — очищенную версию для
+    шеринга (без токсичности на людей и приватного). Работает только если очистка
+    настроена (ключ ЛЛМ в окружении); иначе тихо пропускаем — сырой транскрипт
+    всегда на месте, ничего не ломается."""
+    import clean_llm
+    llm = clean_llm.from_env()
+    if llm is None:
+        return
+    try:
+        res = clean_llm.clean(transcript_text, llm, cut_low=True)
+    except Exception as e:  # noqa: BLE001 — очистка best-effort, не рушить транскрипт
+        print(f"  очистка не удалась ({e}) — пропуск")
+        return
+    (session / "transcript.clean.md").write_text(res.text, encoding="utf-8")
+    print(f"  очищено: {res.summary()}")
+
+
+def _write_summary_copy(session: Path, transcript_text: str) -> None:
+    """Рядом кладёт transcript.summary.md — саммари встречи + action items. Как и
+    очистка: только если настроен ключ ЛЛМ, иначе тихо пропуск. Приватность вшита
+    в рубрику (личное и наезды на людей в саммари не попадают)."""
+    import summarize_llm
+    llm = summarize_llm.from_env()
+    if llm is None:
+        return
+    try:
+        text = summarize_llm.summarize(transcript_text, llm)
+    except Exception as e:  # noqa: BLE001 — best-effort, не рушить транскрипт
+        print(f"  саммари не удалось ({e}) — пропуск")
+        return
+    (session / "transcript.summary.md").write_text(text, encoding="utf-8")
+    print("  саммари готово")
 
 
 def main() -> None:

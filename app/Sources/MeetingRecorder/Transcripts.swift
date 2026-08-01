@@ -129,8 +129,41 @@ enum TranscriptStore {
         return out
     }
 
+    /// Очищенная версия для базы: transcript.clean.md с подстановкой имени вместо «Я».
+    /// nil — если очистка не делалась (нет ключа ЛЛМ). Сырой в базу не уходит.
+    static func cleanBodyForSharing(_ session: URL) -> String? {
+        let f = session.appendingPathComponent("transcript.clean.md")
+        guard let t = try? String(contentsOf: f, encoding: .utf8) else { return nil }
+        return t.replacingOccurrences(of: "] Я:**", with: "] \(ownerName(session)):**")
+    }
+
+    static func summaryForSharing(_ session: URL) -> String {
+        let f = session.appendingPathComponent("transcript.summary.md")
+        return (try? String(contentsOf: f, encoding: .utf8)) ?? ""
+    }
+
+    /// Есть ли что заливать: очищенная версия готова (значит и ключ ЛЛМ настроен).
+    static func canPush(_ session: URL) -> Bool {
+        FileManager.default.fileExists(
+            atPath: session.appendingPathComponent("transcript.clean.md").path)
+    }
+
     static func push(_ item: MeetingItem) async throws {
-        try await insert(item: item, body: bodyForSharing(item.session), deleted: 0)
+        guard let clean = cleanBodyForSharing(item.session) else {
+            throw CH.CHError.server(
+                "нет очищенной версии — задайте ключ ЛЛМ и переобработайте встречу")
+        }
+        try await insert(item: item, body: clean,
+                         summary: summaryForSharing(item.session), deleted: 0)
+    }
+
+    /// Залить сессию по пути (для промпта «отправить?» сразу после обработки).
+    static func pushSession(_ session: URL, title: String?) async throws {
+        let item = MeetingItem(id: session.lastPathComponent,
+                               session: session,
+                               title: title ?? session.lastPathComponent,
+                               startedAt: Date())
+        try await push(item)
     }
 
     /// Удаление из общей базы — НАСТОЯЩЕЕ, физическое.
@@ -145,14 +178,16 @@ enum TranscriptStore {
         _ = try await CH.run("ALTER TABLE \(DBConfig.table) DELETE WHERE meeting_key = '\(key)'")
     }
 
-    private static func insert(item: MeetingItem, body: String, deleted: Int) async throws {
+    private static func insert(item: MeetingItem, body: String, summary: String = "",
+                               deleted: Int) async throws {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd HH:mm:ss"
         let row: [String: Any] = [
             "meeting_key": item.id,
             "title": item.title,
             "started_at": f.string(from: item.startedAt == .distantPast ? Date() : item.startedAt),
-            "body": body,
+            "body": body,                                    // очищенный транскрипт
+            "summary": deleted == 1 ? "" : summary,          // саммари + action items
             "deleted": deleted,
             "content_hash": deleted == 1 ? "" : contentHash(body),
             "attendees": attendees(item.session),
@@ -160,7 +195,7 @@ enum TranscriptStore {
         ]
         let json = try JSONSerialization.data(withJSONObject: row, options: [])
         let sql = "INSERT INTO \(DBConfig.table) (meeting_key, title, started_at, body, "
-            + "deleted, content_hash, attendees, speakers) FORMAT JSONEachRow"
+            + "summary, deleted, content_hash, attendees, speakers) FORMAT JSONEachRow"
         _ = try await CH.run(sql, body: json)
     }
 }
