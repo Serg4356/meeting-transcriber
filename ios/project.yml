@@ -1,0 +1,45 @@
+name: Terminus
+options:
+  bundleIdPrefix: com.example
+targets:
+  Terminus:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - Sources
+      - Resources
+      # Палитра и знак — общие с мак-аппкой (чистый SwiftUI, без AppKit).
+      # Копию НЕ заводим: бренд должен меняться в одном месте.
+      - path: ../app/Sources/MeetingRecorder/Brand.swift
+      - path: ../app/Sources/MeetingRecorder/Logo.swift
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.example.terminus
+      ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      GENERATE_INFOPLIST_FILE: "YES"
+      INFOPLIST_KEY_CFBundleDisplayName: Terminus
+      INFOPLIST_KEY_NSMicrophoneUsageDescription: "Запись голоса на встрече"
+      INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
+      INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+      SUPPORTS_MACCATALYST: "NO"
+      TARGETED_DEVICE_FAMILY: "1"
+      CODE_SIGN_STYLE: Automatic
+      DEVELOPMENT_TEAM: ""  # свой Team ID
+    info:
+      path: Info.plist
+      properties:
+        # запись продолжается, когда экран погас или открыт другой апп
+        UIBackgroundModes: [audio]
+        # локальный Мак по http в домашней сети — TLS там нет
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSLocalNetworkUsageDescription: "Отправка записи на ваш Мак для расшифровки"
+  TerminusTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources: [Tests]
+    settings:
+      GENERATE_INFOPLIST_FILE: "YES"
+    dependencies:
+      - target: Terminus

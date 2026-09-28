@@ -40,10 +40,14 @@ enum AppPaths {
         env["PATH"] = base.map { "\(brew):\($0)" } ?? "\(brew):/usr/bin:/bin:/usr/sbin:/sbin"
         // Ключ ЛЛМ из Keychain → окружение Python: transcribe.py по нему (from_env)
         // локально чистит транскрипт и делает саммари. Нет ключа — только сырой.
-        let key = Keychain.get(account: "llm.key")
+        let key = Secrets.get(account: "llm.key")
         if !key.isEmpty { env["ANTHROPIC_API_KEY"] = key }
         let model = UserDefaults.standard.string(forKey: "llm.model") ?? ""
         if !model.isEmpty { env["CLEAN_MODEL"] = model }
+        // Base URL задан → clean_llm.from_env идёт в OpenAI-совместимый endpoint
+        // (ключ выше — тот же), пуст → Anthropic.
+        let baseURL = UserDefaults.standard.string(forKey: "llm.baseURL") ?? ""
+        if !baseURL.isEmpty { env["LLM_BASE_URL"] = baseURL }
         return env
     }
 

@@ -12,15 +12,16 @@ struct MeetingPopupView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Image(systemName: "video.circle.fill")
-                    .foregroundStyle(.blue)
+                    .foregroundStyle(Color.brandCream.opacity(0.85))
                     .font(.title2)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(meeting.title)
                         .font(.headline)
+                        .foregroundStyle(Color.brandCream)
                         .lineLimit(2)
                     Text(meeting.startsInText)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.brandCream.opacity(0.6))
                 }
             }
 
@@ -29,12 +30,16 @@ struct MeetingPopupView: View {
                     Text(meeting.url != nil ? "Подключиться и записать" : "Записать")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(BrandProminentButtonStyle(fill: .brandCream))
                 Button("Позже", action: onDismiss)
+                    .buttonStyle(.bordered)
             }
         }
         .padding(16)
         .frame(width: 340)
+        .background(Color.brandCharcoal)
+        .environment(\.colorScheme, .dark)
+        .tint(Color.brandCream.opacity(0.85))
     }
 }
 
@@ -56,6 +61,7 @@ final class MeetingPopupController {
             styleMask: [.titled, .closable, .nonactivatingPanel],
             backing: .buffered, defer: false)
         panel.title = "Встреча скоро"
+        panel.appearance = NSAppearance(named: .darkAqua)  // бренд TERMINUS — тёмный
         panel.isFloatingPanel = true
         panel.level = .floating
         panel.hidesOnDeactivate = false

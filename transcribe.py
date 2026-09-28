@@ -473,19 +473,62 @@ def resolve_speaker_names(turns: list[tuple[float, float, str]],
     return names
 
 
+def owner_from_meta(meta: dict) -> str | None:
+    """Имя владельца записи: явное поле owner (пишет телефон) либо участник
+    встречи, которого нет среди «остальных» (календарь мак-аппки)."""
+    if meta.get("owner"):
+        return str(meta["owner"])
+    others = set(meta.get("others") or [])
+    return next((a for a in meta.get("attendees", []) if a not in others), None)
+
+
+def speaker_label(label: str, names: dict[str, str], owner: str | None) -> str:
+    """Кластер диаризации → подпись реплики. Владелец подписывается «Я», чтобы
+    телефонные транскрипты читались так же, как записи мак-аппки."""
+    who = names.get(label)
+    if owner and who == owner:
+        return "Я"
+    return who or prettify_speaker(label)
+
+
 def build_transcript(session: Path, model_name: str, language: str | None,
                      do_diarize: bool, num_speakers: int | None = None,
                      dedupe: bool = True) -> Path:
     mic = find_track(session, "mic")
     system = find_track(session, "system")
     meta = load_meeting_meta(session)
+    # Телефон пишет ОДНУ дорожку, где все спикеры вперемешку. Без этого флага
+    # пайплайн считает микрофон речью владельца, а всех остальных выбрасывает
+    # как «эхо» — от встречи остаётся один голос.
+    single_track = bool(meta.get("single_track"))
 
     repo = MLX_REPOS.get(model_name, model_name)  # можно передать и полный HF-repo
     print(f"Whisper на GPU (MLX): {model_name} → {repo}")
 
     segments: list[Segment] = []
 
-    if mic.exists():
+    if mic.exists() and single_track:
+        print("Транскрипция записи с телефона (одна дорожка):")
+        mic_segs = _asr_cached(session, "mic", repo, mic, language)
+        turns: list[tuple[float, float, str]] = []
+        vecs: dict[str, list[float]] = {}
+        hf_token = os.environ.get("HF_TOKEN", "")
+        if do_diarize and hf_token:
+            print("Диаризация записи:")
+            try:
+                turns, vecs = _diar_cached(session, mic, hf_token, num_speakers,
+                                           meta.get("accepted_count") or None)
+            except Exception as e:  # noqa: BLE001 — транскрипт важнее разметки
+                print(f"  диаризация не удалась ({e}) — реплики пойдут как «Собеседник»")
+        elif do_diarize and not hf_token:
+            print("  HF_TOKEN не задан — диаризация пропущена (см. README).")
+        names = resolve_speaker_names(turns, vecs, meta)
+        owner = owner_from_meta(meta)
+        for s, e, txt in mic_segs:
+            spk = speaker_label(assign_speaker(s, e, turns), names, owner) if turns else "Собеседник"
+            segments.append(Segment(s, e, txt, spk))
+
+    elif mic.exists():
         print("Транскрипция микрофона:")
         mic_segs = _asr_cached(session, "mic", repo, mic, language)
 
@@ -495,8 +538,7 @@ def build_transcript(session: Path, model_name: str, language: str | None,
         hf = os.environ.get("HF_TOKEN", "")
         if do_diarize and hf:
             import voiceprints as vp
-            others = set(meta.get("others") or [])
-            me = next((a for a in meta.get("attendees", []) if a not in others), None)
+            me = owner_from_meta(meta)
             lib = vp.load()
             if me and me in lib:
                 own_iv = own_speech_intervals(mic, hf, lib[me]["vec"])
@@ -540,7 +582,9 @@ def build_transcript(session: Path, model_name: str, language: str | None,
                 spk = "Собеседник"
             segments.append(Segment(s, e, txt, spk))
 
-    if dedupe:
+    # Дедуп ищет эхо ОДНОЙ дорожки в другой; при одной дорожке сравнивать не с
+    # чем, и он бы просто резал живой диалог.
+    if dedupe and not single_track:
         segments = dedupe_bleed(segments)
     segments.sort(key=lambda x: x.start)
 

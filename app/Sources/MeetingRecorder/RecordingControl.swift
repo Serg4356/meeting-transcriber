@@ -14,7 +14,7 @@ private struct RecordingWave: View {
             HStack(spacing: 3) {
                 ForEach(0..<4, id: \.self) { i in
                     Capsule()
-                        .fill(Color.secondary.opacity(0.7))
+                        .fill(Color.brandCream.opacity(0.8))
                         .frame(width: 4, height: barHeight(t, i))
                 }
             }
@@ -36,10 +36,12 @@ private struct StopButton: View {
         Button(action: action) {
             ZStack {
                 Circle()
-                    .fill(Color.red.opacity(hover ? 0.22 : 0.13))
+                    .strokeBorder(Color.brandCream.opacity(0.35), lineWidth: 1.5)
+                    .background(Circle().fill(
+                        Color.brandOrange.opacity(hover ? 0.15 : 0)))
                     .frame(width: 34, height: 34)
                 RoundedRectangle(cornerRadius: 3)
-                    .fill(Color.red)
+                    .fill(Color.brandOrange)
                     .frame(width: 12, height: 12)
             }
         }
@@ -58,7 +60,7 @@ struct RecordingControlView: View {
             AppLogo(size: 34)
             if model.isPaused {
                 Image(systemName: "pause.fill")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.brandCream.opacity(0.6))
                     .frame(height: 22)
             } else {
                 RecordingWave()
@@ -66,7 +68,7 @@ struct RecordingControlView: View {
             Button(action: { model.togglePause() }) {
                 Image(systemName: model.isPaused ? "play.fill" : "pause.fill")
                     .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.brandCream.opacity(0.6))
                     .frame(width: 30, height: 22)
             }
             .buttonStyle(.plain)
@@ -74,19 +76,21 @@ struct RecordingControlView: View {
             StopButton(action: onStop)
             Text(model.isPaused ? "⏸ \(model.elapsed)" : model.elapsed)
                 .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.brandCream.opacity(0.6))
         }
         .padding(.vertical, 14)
         .padding(.horizontal, 12)
         .frame(width: 62)
         .background(
             Capsule(style: .continuous)
-                .fill(.regularMaterial)
-                .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
+                .fill(Color.brandCharcoal)
+                .shadow(color: .black.opacity(0.35), radius: 12, y: 4)
         )
         .overlay(
-            Capsule(style: .continuous).strokeBorder(.white.opacity(0.25), lineWidth: 0.5)
+            Capsule(style: .continuous)
+                .strokeBorder(Color.brandCream.opacity(0.16), lineWidth: 1)
         )
+        .environment(\.colorScheme, .dark)
         .padding(6)
     }
 }

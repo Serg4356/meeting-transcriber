@@ -12,9 +12,11 @@ import ScreenCaptureKit
 
 enum RecorderError: Error, LocalizedError {
     case noDisplay
+    case noMicFormat
     var errorDescription: String? {
         switch self {
         case .noDisplay: return "Нет доступного дисплея для захвата"
+        case .noMicFormat: return "Микрофон недоступен (нулевой формат входа)"
         }
     }
 }
@@ -92,7 +94,7 @@ final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate {
 final class Recorder {
     private var stream: SCStream?
     private var output: StreamOutput?
-    private let micEngine = AVAudioEngine()
+    private var micEngine = AVAudioEngine()
     private var micFile: AVAudioFile?
     private let pauseFlag = PauseFlag()
     private(set) var sessionURL: URL?
@@ -110,7 +112,33 @@ final class Recorder {
         return dir
     }
 
+    /// Свежий движок под сессию + гарантированно живой вход.
+    ///
+    /// Когда HAL в момент старта переключает устройство (типично после сна
+    /// Мака), `inputNode` приходит НЕ привязанным к движку. Тогда `installTap`
+    /// кидает ObjC-исключение `required condition is false: NULL != engine`,
+    /// Swift его не ловит и процесс умирает с SIGABRT — пять крэшей
+    /// 07–16.09.2026. Поэтому привязку проверяем сами и отдаём nil.
+    ///
+    /// Порядок строг: узел → проверка → `prepare()`. На пустом графе сам
+    /// `prepare()` кидает `inputNode != nullptr || outputNode != nullptr`
+    /// (воспроизведено смоук-скриптом), то есть до проверки его звать нельзя.
+    private func makeMicInput() -> AVAudioInputNode? {
+        micEngine.stop()
+        micEngine = AVAudioEngine()
+        let input = micEngine.inputNode
+        guard input.engine != nil else { return nil }
+        let fmt = input.outputFormat(forBus: 0)
+        guard fmt.sampleRate > 0, fmt.channelCount > 0 else { return nil }
+        input.removeTap(onBus: 0)
+        micEngine.prepare()
+        return input
+    }
+
     func start(baseDir: URL) async throws -> URL {
+        // Флаг живёт дольше сессии: стоп во время паузы оставлял paused=true,
+        // и все следующие записи молча писали 0 байт (02–04.09.2026).
+        pauseFlag.paused = false
         let session = makeSession(baseDir)
 
         // --- Системный звук: ScreenCaptureKit ---
@@ -139,17 +167,30 @@ final class Recorder {
 
         // --- Микрофон: AVAudioEngine (уживается с Zoom) ---
         let micURL = session.appendingPathComponent("mic.caf")
-        let input = micEngine.inputNode
-        let micFormat = input.outputFormat(forBus: 0)
-        let file = try AVAudioFile(forWriting: micURL, settings: micFormat.settings)
-        self.micFile = file
-        let pf = pauseFlag
-        input.installTap(onBus: 0, bufferSize: 4096, format: micFormat) { buffer, _ in
-            guard !pf.paused else { return }
-            do { try file.write(from: buffer) } catch { NSLog("[микрофон] запись: \(error)") }
+        do {
+            // Вторая попытка через паузу: первая часто ловит HAL в момент
+            // переконфигурации устройства (после сна Мака).
+            var candidate = makeMicInput()
+            if candidate == nil {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                candidate = makeMicInput()
+            }
+            guard let input = candidate else { throw RecorderError.noMicFormat }
+            let micFormat = input.outputFormat(forBus: 0)
+            let file = try AVAudioFile(forWriting: micURL, settings: micFormat.settings)
+            self.micFile = file
+            let pf = pauseFlag
+            input.installTap(onBus: 0, bufferSize: 4096, format: micFormat) { buffer, _ in
+                guard !pf.paused else { return }
+                do { try file.write(from: buffer) } catch { NSLog("[микрофон] запись: \(error)") }
+            }
+            try micEngine.start()
+        } catch {
+            // Системный захват уже идёт — без этого он остался бы висеть
+            // навсегда (в self.stream попадает только успешный старт).
+            try? await newStream.stopCapture()
+            throw error
         }
-        micEngine.prepare()
-        try micEngine.start()
 
         self.stream = newStream
         self.output = out

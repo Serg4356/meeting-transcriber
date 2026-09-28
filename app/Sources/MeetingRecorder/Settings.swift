@@ -1,27 +1,47 @@
 // Настройки: где хранить записи и учётка корпоративной БД для выгрузки транскриптов.
-// Пароль живёт в Keychain, остальное — в UserDefaults. В файлы креды не пишем.
+// Секреты — в файле 0600 рядом с voiceprints.json, остальное — в UserDefaults.
+// Раньше секреты жили в Keychain, но его ACL привязан к подписи бинаря:
+// каждая пересборка (self-signed cert без trust-анкора) ломала доверие и
+// приложение спрашивало пароль связки на КАЖДОЕ чтение. Файл этим не страдает.
 
 import AppKit
 import Security
 import SwiftUI
 
-// MARK: - Keychain (только пароль)
+// MARK: - Секреты (токен сервиса, ключ ЛЛМ)
 
-enum Keychain {
+enum Secrets {
     private static let service = "com.serg.meeting-transcriber.db"
+    private static let url = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Documents/Meeting Transcriber/secrets.json")
+
+    private static func load() -> [String: String] {
+        guard let data = try? Data(contentsOf: url),
+              let d = try? JSONDecoder().decode([String: String].self, from: data)
+        else { return [:] }
+        return d
+    }
 
     static func set(_ value: String, account: String) {
-        let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-                                kSecAttrService as String: service,
-                                kSecAttrAccount as String: account]
-        SecItemDelete(q as CFDictionary)
-        guard !value.isEmpty, let data = value.data(using: .utf8) else { return }
-        var add = q
-        add[kSecValueData as String] = data
-        SecItemAdd(add as CFDictionary, nil)
+        var d = load()
+        if value.isEmpty { d.removeValue(forKey: account) } else { d[account] = value }
+        guard let data = try? JSONEncoder().encode(d) else { return }
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
+        try? data.write(to: url)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                               ofItemAtPath: url.path)
     }
 
     static func get(account: String) -> String {
+        if let v = load()[account] { return v }
+        // Миграция из Keychain: одно чтение (последний запрос пароля) → в файл.
+        let legacy = keychainGet(account: account)
+        if !legacy.isEmpty { set(legacy, account: account) }
+        return legacy
+    }
+
+    private static func keychainGet(account: String) -> String {
         let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                 kSecAttrService as String: service,
                                 kSecAttrAccount as String: account,
@@ -34,92 +54,81 @@ enum Keychain {
     }
 }
 
-// MARK: - Конфиг БД
+// MARK: - Конфиг сервиса выгрузки
 
-enum DBConfig {
+/// Выгрузка идёт через HTTP-сервис выгрузки, НЕ напрямую в БД:
+/// у пользователя в приложении только личный токен (SSO-страница сервиса),
+/// креды базы живут на сервере. uploaded_by штампует сервис из токена.
+enum ServiceConfig {
     private static let d = UserDefaults.standard
 
-    static var host: String {
-        get { d.string(forKey: "db.host") ?? "" }
-        set { d.set(newValue, forKey: "db.host") }
+    static var url: String {
+        get { d.string(forKey: "svc.url") ?? "" }
+        set { d.set(newValue, forKey: "svc.url") }
     }
-    static var user: String {
-        get { d.string(forKey: "db.user") ?? "" }
-        set { d.set(newValue, forKey: "db.user") }
+    static var token: String {
+        get { Secrets.get(account: "svc.token") }
+        set { Secrets.set(newValue, account: "svc.token") }
     }
-    /// Имя таблицы задаёт пользователь: оно зависит от политики его компании
-    /// (и обычно меняется, когда временную схему заменяют на постоянную).
-    /// Дефолта намеренно нет — в открытом коде не место внутренним именам схем.
-    static var table: String {
-        get { d.string(forKey: "db.table") ?? "" }
-        set { d.set(newValue, forKey: "db.table") }
-    }
-    static var password: String {
-        get { Keychain.get(account: "db.password") }
-        set { Keychain.set(newValue, account: "db.password") }
-    }
-
-    static var isConfigured: Bool { !host.isEmpty && !user.isEmpty && !table.isEmpty }
-
-    /// Полный URL HTTP-интерфейса ClickHouse. Порт по умолчанию 8123.
-    static var url: URL? {
-        var h = host.trimmingCharacters(in: .whitespaces)
-        if !h.contains("://") { h = "http://" + h }
-        if URL(string: h)?.port == nil { h += ":8123" }
-        return URL(string: h)
-    }
+    static var isConfigured: Bool { !url.isEmpty && !token.isEmpty }
 }
 
 // MARK: - Конфиг ЛЛМ (локальная очистка + саммари)
 
 enum LLMConfig {
     private static let d = UserDefaults.standard
-    /// Ключ живёт в Keychain, как пароль БД — в файлы/UserDefaults не пишем.
     /// По нему transcribe.py чистит транскрипт и делает саммари на этой машине.
     static var key: String {
-        get { Keychain.get(account: "llm.key") }
-        set { Keychain.set(newValue, account: "llm.key") }
+        get { Secrets.get(account: "llm.key") }
+        set { Secrets.set(newValue, account: "llm.key") }
     }
     static var model: String {
         get { d.string(forKey: "llm.model") ?? "" }
         set { d.set(newValue, forKey: "llm.model") }
     }
+    /// Пусто → Anthropic. Задан (например https://api.openai.com/v1 или
+    /// http://localhost:11434/v1) → OpenAI-совместимый endpoint, модель обязательна.
+    static var baseURL: String {
+        get { d.string(forKey: "llm.baseURL") ?? "" }
+        set { d.set(newValue, forKey: "llm.baseURL") }
+    }
     static var isConfigured: Bool { !key.isEmpty }
 }
 
-// MARK: - Клиент ClickHouse (HTTP)
+// MARK: - Клиент сервиса выгрузки (HTTP + Bearer)
 
-enum CH {
-    /// Выполняет запрос. Креды уходят заголовками, а не в URL — иначе пароль
-    /// оседает в логах прокси и истории.
-    static func run(_ sql: String, body: Data? = nil) async throws -> String {
-        guard let base = DBConfig.url else { throw CHError.notConfigured }
-        var req = URLRequest(url: base)
-        req.httpMethod = "POST"
+enum Service {
+    /// GET (json == nil) или POST c JSON-телом. Токен — заголовком, не в URL.
+    static func call(_ path: String, json: [String: Any]? = nil) async throws -> Data {
+        guard ServiceConfig.isConfigured,
+              let url = URL(string: ServiceConfig.url.trimmingCharacters(in: .whitespaces)
+                                        .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                            + path)
+        else { throw ServiceError.notConfigured }
+        var req = URLRequest(url: url)
         req.timeoutInterval = 30
-        req.setValue(DBConfig.user, forHTTPHeaderField: "X-ClickHouse-User")
-        req.setValue(DBConfig.password, forHTTPHeaderField: "X-ClickHouse-Key")
-        if let body {
-            var payload = Data((sql + "\n").utf8)
-            payload.append(body)
-            req.httpBody = payload
-        } else {
-            req.httpBody = Data(sql.utf8)
+        req.setValue("Bearer \(ServiceConfig.token)", forHTTPHeaderField: "Authorization")
+        if let json {
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try JSONSerialization.data(withJSONObject: json)
         }
         let (data, resp) = try await URLSession.shared.data(for: req)
-        let text = String(data: data, encoding: .utf8) ?? ""
-        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
-            throw CHError.server(text.isEmpty ? "HTTP-ошибка" : String(text.prefix(300)))
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        guard code == 200 else {
+            let text = String(data: data, encoding: .utf8) ?? ""
+            if code == 401 { throw ServiceError.server("токен не принят — получите новый в настройках") }
+            throw ServiceError.server(text.isEmpty ? "HTTP \(code)" : String(text.prefix(300)))
         }
-        return text
+        return data
     }
 
-    enum CHError: LocalizedError {
+    enum ServiceError: LocalizedError {
         case notConfigured
         case server(String)
         var errorDescription: String? {
             switch self {
-            case .notConfigured: return "Не заданы хост и пользователь БД"
+            case .notConfigured: return "Не заданы URL сервиса и токен"
             case .server(let m): return m
             }
         }
@@ -170,12 +179,11 @@ private struct FolderRow: View {
 struct SettingsView: View {
     @AppStorage(AppPaths.recordingsDirKey) private var recDir: String = ""
     @AppStorage(AppPaths.transcriptsDirKey) private var txtDir: String = ""
-    @State private var host = DBConfig.host
-    @State private var user = DBConfig.user
-    @State private var table = DBConfig.table
-    @State private var password = DBConfig.password
+    @State private var svcUrl = ServiceConfig.url
+    @State private var svcToken = ServiceConfig.token
     @State private var llmKey = LLMConfig.key
     @State private var llmModel = LLMConfig.model
+    @State private var llmBase = LLMConfig.baseURL
     @State private var checkResult: String?
     @State private var checking = false
 
@@ -204,11 +212,15 @@ struct SettingsView: View {
             }
 
             Section("Выгрузка в общую базу") {
-                TextField("Хост", text: $host, prompt: Text("clickhouse.example.com"))
-                TextField("Пользователь", text: $user, prompt: Text("логин"))
-                SecureField("Пароль", text: $password, prompt: Text("хранится в Keychain"))
-                TextField("Таблица", text: $table, prompt: Text("схема.таблица"))
+                TextField("URL сервиса", text: $svcUrl,
+                          prompt: Text("https://meetings.example.internal"))
+                SecureField("Токен", text: $svcToken, prompt: Text("хранится локально (0600)"))
                 HStack {
+                    Button("Получить токен…") {
+                        if let u = URL(string: svcUrl.trimmingCharacters(in: .whitespaces)) {
+                            NSWorkspace.shared.open(u)
+                        }
+                    }
                     Button("Сохранить и проверить", action: saveAndCheck)
                         .disabled(checking)
                     if checking { ProgressView().controlSize(.small) }
@@ -218,21 +230,47 @@ struct SettingsView: View {
                             .lineLimit(2)
                     }
                 }
-                Text("Само ничего не уходит. После обработки встречи приложение спросит, "
-                     + "отправлять ли её (уйдут только очищенная версия и саммари, не сырой).")
+                Text("Личные креды БД не нужны: войдите на странице сервиса через корп-SSO, "
+                     + "скопируйте токен сюда. Само ничего не уходит — после обработки встречи "
+                     + "приложение спросит (уйдут только очищенная версия и саммари, не сырой).")
                     .font(.caption2).foregroundStyle(.secondary)
             }
 
             Section("Очистка и саммари (локально)") {
-                SecureField("Ключ ЛЛМ", text: $llmKey, prompt: Text("хранится в Keychain"))
+                SecureField("Ключ ЛЛМ", text: $llmKey, prompt: Text("хранится локально (0600)"))
                 TextField("Модель", text: $llmModel, prompt: Text("claude-sonnet-5"))
+                TextField("Base URL (не-Claude)", text: $llmBase,
+                          prompt: Text("пусто = Anthropic"))
                 Text("Транскрипты чистятся и саммаризируются на вашем Маке этим ключом — "
-                     + "звук и текст никуда не уходят. Без ключа остаётся только сырой транскрипт.")
+                     + "звук и текст никуда не уходят. Без ключа остаётся только сырой транскрипт. "
+                     + "Другая ЛЛМ (OpenAI, DeepSeek, Ollama…): укажите её OpenAI-совместимый "
+                     + "Base URL (например http://localhost:11434/v1) и имя модели — обязательно.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            // Сохранение — сразу при вводе: раньше ключ ЛЛМ записывался только по
+            // кнопке «Сохранить и проверить» из секции БД, и без неё молча терялся.
+            .onChange(of: llmKey) { LLMConfig.key = llmKey.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .onChange(of: llmModel) { LLMConfig.model = llmModel.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .onChange(of: llmBase) { LLMConfig.baseURL = llmBase.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+            Section("О программе") {
+                LabeledContent("Версия", value: Self.versionLine)
+                Text("Если после обновления настройки выглядят по-старому — "
+                     + "перезапустите приложение: окно могло остаться от старого процесса.")
                     .font(.caption2).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
         .frame(width: 460, height: 700)
+    }
+
+    /// «2026.08.07 (сборка ae4b36a)» — из Info.plist, штампует package_app.sh.
+    /// Запуск из swift run (без бандла) — «dev».
+    static var versionLine: String {
+        let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let b = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        guard let v, let b else { return "dev" }
+        return "\(v) (сборка \(b))"
     }
 
     /// Есть ли в старом месте РЕАЛЬНЫЕ записи. Скрытые файлы не считаем:
@@ -256,18 +294,14 @@ struct SettingsView: View {
     }
 
     private func saveAndCheck() {
-        DBConfig.host = host
-        DBConfig.user = user
-        DBConfig.table = table
-        DBConfig.password = password
-        LLMConfig.key = llmKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        LLMConfig.model = llmModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        ServiceConfig.url = svcUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+        ServiceConfig.token = svcToken.trimmingCharacters(in: .whitespacesAndNewlines)
         checking = true
         checkResult = nil
         Task {
             do {
-                let who = try await CH.run("SELECT currentUser()")
-                checkResult = "✓ подключено: \(who.trimmingCharacters(in: .whitespacesAndNewlines))"
+                _ = try await Service.call("/api/state")
+                checkResult = "✓ подключено, токен принят"
             } catch {
                 checkResult = "✗ \(error.localizedDescription)"
             }
@@ -281,10 +315,12 @@ final class SettingsController {
 
     func show() {
         if let panel { panel.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
-        let hosting = NSHostingView(rootView: SettingsView())
+        let hosting = NSHostingView(rootView: SettingsView()
+            .tint(Color.brandCream.opacity(0.85)))
         let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 460, height: 420),
                         styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        p.title = "Meeting Transcriber — настройки"
+        p.appearance = NSAppearance(named: .darkAqua)  // бренд TERMINUS — тёмный
+        p.title = "Terminus — настройки"
         p.contentView = hosting
         p.setContentSize(hosting.fittingSize)
         p.center()

@@ -236,6 +236,7 @@ final class AppModel: ObservableObject {
         guard phase == .recording else { return }
         isPaused.toggle()
         recorder.setPaused(isPaused)
+        Log.write(isPaused ? "PAUSE pressed" : "RESUME pressed")
         if isPaused {
             pauseStart = Date()
             status = "⏸ Пауза  \(elapsed)"
@@ -316,7 +317,7 @@ final class AppModel: ObservableObject {
     /// явно, отправлять ли встречу. Само ничего не уходит (осознанное согласие на
     /// каждую встречу). В базу идут очищенная версия + саммари, сырой остаётся локально.
     private func maybeOfferUpload(session: URL, title: String?) {
-        guard DBConfig.isConfigured, TranscriptStore.canPush(session) else { return }
+        guard ServiceConfig.isConfigured, TranscriptStore.canPush(session) else { return }
         let alert = NSAlert()
         alert.messageText = "Отправить встречу в общую базу?"
         alert.informativeText = "«\(title ?? session.lastPathComponent)»: в общую базу отдела "
@@ -501,14 +502,15 @@ private struct MenuRow: View {
             HStack(spacing: 8) {
                 Image(systemName: systemImage)
                     .frame(width: 16)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.brandCream.opacity(0.6))
                 Text(title)
+                    .foregroundStyle(Color.brandCream.opacity(0.92))
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 6)
             .padding(.vertical, 4)
             .contentShape(Rectangle())
-            .background(hovering ? Color.primary.opacity(0.07) : .clear,
+            .background(hovering ? Color.brandCream.opacity(0.08) : .clear,
                         in: RoundedRectangle(cornerRadius: 5))
         }
         .buttonStyle(.plain)
@@ -522,8 +524,11 @@ struct ContentView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                AppLogo(size: 20)
-                Text("Meeting Transcriber").font(.headline)
+                AppLogo(size: 22)
+                Text("TERMINUS")
+                    .font(.system(size: 14, weight: .heavy))
+                    .kerning(1.8)
+                    .foregroundStyle(Color.brandCream)
                 Spacer()
             }
 
@@ -534,32 +539,39 @@ struct ContentView: View {
                       systemImage: model.isRecording ? "stop.fill" : "record.circle")
                     .frame(maxWidth: .infinity)
             }
-            .controlSize(.large)
-            .buttonStyle(.borderedProminent)
-            .tint(model.isRecording ? .red : .accentColor)
+            .buttonStyle(BrandProminentButtonStyle(outlined: model.isRecording))
 
             // Статус — следствие действия, поэтому стоит ПОД кнопкой, а не над.
+            // Цвета ЯВНЫЕ (не .secondary/.primary): в светлой теме системы
+            // динамические цвета чёрные — нечитаемо на угольном фоне.
             HStack(spacing: 6) {
                 if model.bgJobs > 0 { ProgressView().controlSize(.small) }
                 Text(model.status)
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption)
+                    .foregroundStyle(Color.brandCream.opacity(0.6))
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             if let nm = model.nextMeeting {
-                Divider()
+                BrandDivider()
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Следующая встреча").font(.caption2).foregroundStyle(.tertiary)
+                    Text("Следующая встреча").font(.caption2)
+                        .foregroundStyle(Color.brandCream.opacity(0.4))
                     Text(nm.title).font(.caption).lineLimit(1)
+                        .foregroundStyle(Color.brandCream.opacity(0.92))
                     HStack(spacing: 6) {
-                        Text(nm.startsInText).font(.caption2).foregroundStyle(.secondary)
+                        Text(nm.startsInText).font(.caption2)
+                            .foregroundStyle(Color.brandCream.opacity(0.6))
                         Button("проверить напоминание") { model.testPopup() }
-                            .buttonStyle(.link).font(.caption2)
+                            .buttonStyle(.plain)
+                            .font(.caption2)
+                            .foregroundStyle(Color.brandCream.opacity(0.6))
+                            .underline()
                     }
                 }
             }
 
-            Divider()
+            BrandDivider()
 
             // Все переходы — одинаковыми строками. «Последний транскрипт» тоже
             // строка, а не вторая большая кнопка: раньше он визуально дублировал
@@ -582,14 +594,30 @@ struct ContentView: View {
                 }
             }
 
-            Divider()
+            BrandDivider()
 
-            Toggle("Запускать при входе", isOn: Binding(
-                get: { model.launchAtLogin },
-                set: { model.setLaunchAtLogin($0) }))
-                .toggleStyle(.checkbox)
-                .font(.caption)
-                .padding(.horizontal, 6)
+            // Свой чекбокс: системный .checkbox — AppKit-контрол, в светлой
+            // теме рисуется белым квадратом и выбивается из бренда.
+            Button(action: { model.setLaunchAtLogin(!model.launchAtLogin) }) {
+                HStack(spacing: 8) {
+                    RoundedRectangle(cornerRadius: 4)
+                        .strokeBorder(Color.brandCream.opacity(0.5), lineWidth: 1.5)
+                        .frame(width: 14, height: 14)
+                        .overlay {
+                            if model.launchAtLogin {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundStyle(Color.brandCream)
+                            }
+                        }
+                    Text("Запускать при входе")
+                        .font(.caption)
+                        .foregroundStyle(Color.brandCream.opacity(0.92))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 6)
 
             MenuRow(title: "Выход", systemImage: "power") {
                 NSApplication.shared.terminate(nil)
@@ -597,6 +625,13 @@ struct ContentView: View {
         }
         .padding(12)
         .frame(width: 290)
+        .background(Color.brandCharcoal)
+        // environment, НЕ preferredColorScheme: последний не долетает до окна
+        // MenuBarExtra, и системные цвета остаются светлотемными (чёрными).
+        .environment(\.colorScheme, .dark)
+        // Монохромный крем для мелких контролов — оранжевый только на
+        // главной кнопке и в π логотипа.
+        .tint(Color.brandCream.opacity(0.85))
     }
 }
 

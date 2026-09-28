@@ -16,13 +16,8 @@ struct MeetingItem: Identifiable {
 }
 
 enum TranscriptStore {
-    /// Ключ встречи. Префикс пользователем — чтобы записи разных людей об одной
-    /// встрече не перетирали друг друга (у каждого свой таймстемп старта).
-    /// ponytail: одна встреча, записанная двумя людьми, ляжет двумя строками.
-    /// Схлопывать — только если это реально начнёт мешать.
-    static func key(user: String, session: URL) -> String {
-        "\(user.isEmpty ? "local" : user)/\(session.lastPathComponent)"
-    }
+    // Ключ встречи = имя папки сессии. Префикс пользователя (чтобы записи разных
+    // людей об одной встрече не перетирались) теперь добавляет СЕРВИС из токена.
 
     private static let folderFmt: DateFormatter = {
         let f = DateFormatter()
@@ -41,7 +36,6 @@ enum TranscriptStore {
            let old = try? fm.contentsOfDirectory(at: legacy, includingPropertiesForKeys: nil) {
             dirs += old
         }
-        let user = DBConfig.user
         return dirs
             .filter { fm.fileExists(atPath: $0.appendingPathComponent("transcript.md").path) }
             .sorted { $0.lastPathComponent > $1.lastPathComponent }
@@ -51,7 +45,7 @@ enum TranscriptStore {
                 let title = (try? String(contentsOf: dir.appendingPathComponent("title.txt"),
                                          encoding: .utf8))?
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                return MeetingItem(id: key(user: user, session: dir),
+                return MeetingItem(id: name,
                                    session: dir,
                                    title: (title?.isEmpty == false ? title! : name),
                                    startedAt: folderFmt.date(from: name) ?? .distantPast)
@@ -102,7 +96,7 @@ enum TranscriptStore {
     static func ownerName(_ session: URL) -> String {
         let others = Set(metaList(session, "others"))
         if let me = attendees(session).first(where: { !others.contains($0) }) { return me }
-        return DBConfig.user.isEmpty ? "Автор записи" : DBConfig.user
+        return "Автор записи"
     }
 
     /// Текст для общей базы: «Я» заменено на имя автора.
@@ -116,17 +110,9 @@ enum TranscriptStore {
     /// Именно хэш, а не просто факт публикации — иначе не узнать, что версия
     /// на диске стала лучше той, что читают коллеги.
     static func publishedState() async throws -> [String: String] {
-        // Спрашиваем саму таблицу, а не вью: её имя задаёт пользователь, и
-        // угадывать имя вью подстановкой строки — прямой путь к мусору в запросе.
-        let sql = "SELECT meeting_key, content_hash FROM \(DBConfig.table) FINAL "
-            + "WHERE uploaded_by = currentUser() AND deleted = 0 FORMAT TSV"
-        let text = try await CH.run(sql)
-        var out: [String: String] = [:]
-        for line in text.split(separator: "\n") {
-            let parts = line.split(separator: "\t", omittingEmptySubsequences: false)
-            if let k = parts.first { out[String(k)] = parts.count > 1 ? String(parts[1]) : "" }
-        }
-        return out
+        let data = try await Service.call("/api/state")
+        let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return obj?["items"] as? [String: String] ?? [:]
     }
 
     /// Очищенная версия для базы: transcript.clean.md с подстановкой имени вместо «Я».
@@ -150,11 +136,21 @@ enum TranscriptStore {
 
     static func push(_ item: MeetingItem) async throws {
         guard let clean = cleanBodyForSharing(item.session) else {
-            throw CH.CHError.server(
+            throw Service.ServiceError.server(
                 "нет очищенной версии — задайте ключ ЛЛМ и переобработайте встречу")
         }
-        try await insert(item: item, body: clean,
-                         summary: summaryForSharing(item.session), deleted: 0)
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        _ = try await Service.call("/api/upload", json: [
+            "meeting_key": item.id,
+            "title": item.title,
+            "started_at": f.string(from: item.startedAt == .distantPast ? Date() : item.startedAt),
+            "body": clean,                                   // очищенный транскрипт
+            "summary": summaryForSharing(item.session),
+            "attendees": attendees(item.session),
+            "speakers": speakers(in: clean),
+            "content_hash": contentHash(clean),
+        ])
     }
 
     /// Залить сессию по пути (для промпта «отправить?» сразу после обработки).
@@ -174,29 +170,7 @@ enum TranscriptStore {
     /// запросом. Для сценария «сказал лишнее и хочу убрать» это не удаление,
     /// а иллюзия, поэтому теперь мутация, которая стирает все версии записи.
     static func unpush(_ item: MeetingItem) async throws {
-        let key = item.id.replacingOccurrences(of: "'", with: "\\'")
-        _ = try await CH.run("ALTER TABLE \(DBConfig.table) DELETE WHERE meeting_key = '\(key)'")
-    }
-
-    private static func insert(item: MeetingItem, body: String, summary: String = "",
-                               deleted: Int) async throws {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        let row: [String: Any] = [
-            "meeting_key": item.id,
-            "title": item.title,
-            "started_at": f.string(from: item.startedAt == .distantPast ? Date() : item.startedAt),
-            "body": body,                                    // очищенный транскрипт
-            "summary": deleted == 1 ? "" : summary,          // саммари + action items
-            "deleted": deleted,
-            "content_hash": deleted == 1 ? "" : contentHash(body),
-            "attendees": attendees(item.session),
-            "speakers": deleted == 1 ? [] : speakers(in: body),
-        ]
-        let json = try JSONSerialization.data(withJSONObject: row, options: [])
-        let sql = "INSERT INTO \(DBConfig.table) (meeting_key, title, started_at, body, "
-            + "summary, deleted, content_hash, attendees, speakers) FORMAT JSONEachRow"
-        _ = try await CH.run(sql, body: json)
+        _ = try await Service.call("/api/delete", json: ["meeting_key": item.id])
     }
 }
 
@@ -211,8 +185,8 @@ final class TranscriptsModel: ObservableObject {
 
     func load() {
         items = TranscriptStore.localMeetings()
-        guard DBConfig.isConfigured else {
-            error = "Не настроена БД — открой «Настройки…»"
+        guard ServiceConfig.isConfigured else {
+            error = "Не настроен сервис выгрузки — открой «Настройки…»"
             return
         }
         loading = true
@@ -318,7 +292,7 @@ struct TranscriptsView: View {
                                     set: { model.toggle(item, to: $0) }))
                                     .labelsHidden()
                                     .toggleStyle(.switch)
-                                    .disabled(!DBConfig.isConfigured)
+                                    .disabled(!ServiceConfig.isConfigured)
                             }
                             .padding(.vertical, 6)
                             Divider()
@@ -339,9 +313,11 @@ final class TranscriptsController {
 
     func show() {
         if let panel { panel.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
-        let hosting = NSHostingView(rootView: TranscriptsView())
+        let hosting = NSHostingView(rootView: TranscriptsView()
+            .tint(Color.brandCream.opacity(0.85)))
         let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 460, height: 420),
                         styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        p.appearance = NSAppearance(named: .darkAqua)  // бренд TERMINUS — тёмный
         p.title = "Мои встречи"
         p.contentView = hosting
         p.setContentSize(hosting.fittingSize)

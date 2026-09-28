@@ -1,23 +1,20 @@
-// Лого Meeting Transcriber — микрофон с красным record-глазком на градиенте.
-// Нарисовано в SwiftUI (совпадает с app/logo.svg), рендерится на любом размере.
+// Лого TERMINUS — микрофон-«паук» в кольце шок-маунта с оранжевой π на чаше
+// (финальная иконка). Рисуется в SwiftUI на любом
+// размере; мелкие детали (пружины) на 20px пропадают деградацией — это ок.
 
 import SwiftUI
 
-private struct MicStand: Shape {
+/// Четыре пружины X-ом между капсулой и кольцом.
+private struct SpiderSprings: Shape {
     func path(in r: CGRect) -> Path {
-        let w = r.width, h = r.height
+        let c = CGPoint(x: r.midX, y: r.midY)
+        let inner = r.width * 0.24, outer = r.width * 0.46
         var p = Path()
-        // U-держатель
-        p.move(to: CGPoint(x: w * 0.22, y: h * 0.50))
-        p.addCurve(to: CGPoint(x: w * 0.78, y: h * 0.50),
-                   control1: CGPoint(x: w * 0.22, y: h * 0.76),
-                   control2: CGPoint(x: w * 0.78, y: h * 0.76))
-        // ножка
-        p.move(to: CGPoint(x: w * 0.50, y: h * 0.70))
-        p.addLine(to: CGPoint(x: w * 0.50, y: h * 0.84))
-        // основание
-        p.move(to: CGPoint(x: w * 0.37, y: h * 0.855))
-        p.addLine(to: CGPoint(x: w * 0.63, y: h * 0.855))
+        for k in 0..<4 {
+            let a = (45.0 + 90.0 * Double(k)) * .pi / 180
+            p.move(to: CGPoint(x: c.x + inner * cos(a), y: c.y + inner * sin(a)))
+            p.addLine(to: CGPoint(x: c.x + outer * cos(a), y: c.y + outer * sin(a)))
+        }
         return p
     }
 }
@@ -26,28 +23,61 @@ struct AppLogo: View {
     var size: CGFloat
 
     var body: some View {
+        let ringD = size * 0.72
+        let ringY = size * 0.46
         ZStack {
             RoundedRectangle(cornerRadius: size * 0.23, style: .continuous)
-                .fill(LinearGradient(
-                    colors: [Color(red: 0.43, green: 0.37, blue: 0.96),
-                             Color(red: 0.55, green: 0.24, blue: 0.94)],
-                    startPoint: .topLeading, endPoint: .bottomTrailing))
+                .fill(Color.brandCharcoal)
 
-            // тело микрофона
-            Capsule()
-                .fill(.white)
-                .frame(width: size * 0.235, height: size * 0.38)
-                .position(x: size / 2, y: size * 0.41)
-
-            // красный record-глазок
+            // кольцо шок-маунта
             Circle()
-                .fill(Color(red: 1.0, green: 0.23, blue: 0.19))
-                .frame(width: size * 0.115)
-                .position(x: size / 2, y: size * 0.34)
+                .strokeBorder(Color.brandCream, lineWidth: size * 0.045)
+                .frame(width: ringD, height: ringD)
+                .position(x: size / 2, y: ringY)
 
-            // держатель + ножка + основание
-            MicStand()
-                .stroke(.white, style: StrokeStyle(lineWidth: size * 0.047, lineCap: .round))
+            // пружины
+            SpiderSprings()
+                .stroke(Color.brandCream, lineWidth: size * 0.022)
+                .frame(width: ringD, height: ringD)
+                .position(x: size / 2, y: ringY)
+
+            // купол-сетка
+            UnevenRoundedRectangle(
+                topLeadingRadius: size * 0.14, bottomLeadingRadius: 0,
+                bottomTrailingRadius: 0, topTrailingRadius: size * 0.14)
+                .fill(Color.brandCream)
+                .frame(width: size * 0.28, height: size * 0.18)
+                .position(x: size / 2, y: ringY - size * 0.115)
+
+            // поясок держателя
+            Rectangle()
+                .fill(Color.brandCream)
+                .frame(width: size * 0.34, height: size * 0.035)
+                .position(x: size / 2, y: ringY - size * 0.008)
+
+            // чаша
+            UnevenRoundedRectangle(
+                topLeadingRadius: 0, bottomLeadingRadius: size * 0.13,
+                bottomTrailingRadius: size * 0.13, topTrailingRadius: 0)
+                .fill(Color.brandCream)
+                .frame(width: size * 0.28, height: size * 0.16)
+                .position(x: size / 2, y: ringY + size * 0.105)
+
+            // π на чаше — фирменная эмблема (как у Пиркса на лбу шлема)
+            Text("π")
+                .font(.system(size: size * 0.13, weight: .bold, design: .serif))
+                .foregroundStyle(Color.brandOrange)
+                .position(x: size / 2, y: ringY + size * 0.095)
+
+            // ножка + основание
+            Rectangle()
+                .fill(Color.brandCream)
+                .frame(width: size * 0.045, height: size * 0.09)
+                .position(x: size / 2, y: ringY + ringD / 2 + size * 0.035)
+            Capsule()
+                .fill(Color.brandCream)
+                .frame(width: size * 0.22, height: size * 0.035)
+                .position(x: size / 2, y: ringY + ringD / 2 + size * 0.09)
         }
         .frame(width: size, height: size)
     }

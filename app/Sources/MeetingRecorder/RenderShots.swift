@@ -49,15 +49,22 @@ enum RenderShots {
 
         // 2) UI — живые окна + screencapture.
         NSApp.setActivationPolicy(.regular)
+        // Без активации процесса все окна рисуются «неактивными» —
+        // prominent-кнопки серые вместо акцентных.
+        NSApp.activate(ignoringOtherApps: true)
         let model = AppModel(preview: true)
         let meeting = Meeting(id: "d", title: "Weekly Sync — Product",
                               start: "2026-07-16T15:00:00+05:00",
                               minutesUntil: 1, meetingUrl: "https://zoom.us/j/123")
 
         var windows: [(String, NSWindow)] = []
+        // Панель снимаем в СВЕТЛОМ appearance: MenuBarExtra-окно живёт в теме
+        // системы, и брендовые поверхности обязаны быть читаемы без darkAqua
+        // (ловит регресс «чёрный текст на угле в светлой теме»).
         windows.append(("window", makeWindow(ContentView(model: model),
-                                              title: "Meeting Transcriber",
-                                              at: NSPoint(x: 120, y: 360))))
+                                              title: "Terminus",
+                                              at: NSPoint(x: 120, y: 360),
+                                              appearance: .aqua)))
         windows.append(("popup", makeWindow(MeetingPopupView(meeting: meeting,
                                               onJoinRecord: {}, onDismiss: {}),
                                               title: nil, at: NSPoint(x: 480, y: 520))))
@@ -74,6 +81,10 @@ enum RenderShots {
         // даём окнам отрисоваться, снимаем статичные PNG, потом — кадры для gif плашки
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
             for (name, w) in heldWindows {
+                // Неактивное окно macOS рисует prominent-кнопки серыми —
+                // делаем окно key и даём runloop'у перерисовать перед снимком.
+                w.makeKeyAndOrderFront(nil)
+                RunLoop.current.run(until: Date().addingTimeInterval(0.35))
                 capture(window: w, to: dir.appendingPathComponent("\(name).png"))
                 print("→ \(name).png")
             }
@@ -137,13 +148,22 @@ enum RenderShots {
         }
     }
 
+    /// Borderless-окно по умолчанию не может стать key → его prominent-кнопки
+    /// всегда серые на снимках. Разрешаем явно.
+    private final class KeyableWindow: NSWindow {
+        override var canBecomeKey: Bool { true }
+    }
+
     @MainActor
     private static func makeWindow<V: View>(_ view: V, title: String?,
-                                            at origin: NSPoint) -> NSWindow {
+                                            at origin: NSPoint,
+                                            appearance: NSAppearance.Name = .darkAqua)
+                                            -> NSWindow {
         let hosting = NSHostingView(rootView: view.padding(title == nil ? 20 : 0))
         let style: NSWindow.StyleMask = title == nil ? [.borderless] : [.titled, .closable]
-        let w = NSWindow(contentRect: NSRect(origin: .zero, size: hosting.fittingSize),
-                         styleMask: style, backing: .buffered, defer: false)
+        let w = KeyableWindow(contentRect: NSRect(origin: .zero, size: hosting.fittingSize),
+                              styleMask: style, backing: .buffered, defer: false)
+        w.appearance = NSAppearance(named: appearance)
         if let title { w.title = title } else {
             w.isOpaque = false
             w.backgroundColor = .clear

@@ -126,17 +126,50 @@ def clean(transcript: str, call_llm: LLMCall, cut_low: bool = False) -> CleanRes
 def from_env(default_model: str = "claude-sonnet-5") -> LLMCall | None:
     """LLM-вызов из окружения, или None если не настроено (тогда очистку пропускаем).
 
-    Нужны: пакет `anthropic` + `ANTHROPIC_API_KEY`. Модель — `CLEAN_MODEL`
-    (по умолчанию Sonnet 5). В проде здесь подменяется корп-клиент — контракт
-    (system, user) -> text тот же."""
+    Два провайдера:
+    - `LLM_BASE_URL` задан → любой OpenAI-совместимый endpoint (OpenAI, DeepSeek,
+      OpenRouter, локальные Ollama/LM Studio). Ключ — `ANTHROPIC_API_KEY` (одно
+      поле «Ключ ЛЛМ» в настройках на всех провайдеров), модель — `CLEAN_MODEL`,
+      для не-Claude обязательна (дефолта нет — у каждого сервера свои имена).
+    - Иначе → Anthropic: пакет `anthropic` + `ANTHROPIC_API_KEY`, модель
+      `CLEAN_MODEL` (по умолчанию Sonnet 5)."""
     import os
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    base = os.environ.get("LLM_BASE_URL", "")
+    model = os.environ.get("CLEAN_MODEL", "")
+    if base:
+        return openai_compat_call(base, key, model) if model else None
+    if not key:
         return None
     try:
         import anthropic  # noqa: F401
     except ImportError:
         return None
-    return anthropic_call(os.environ.get("CLEAN_MODEL", default_model))
+    return anthropic_call(model or default_model)
+
+
+def openai_compat_call(base_url: str, api_key: str = "", model: str = "") -> LLMCall:
+    """Адаптер под OpenAI-совместимый API: POST {base_url}/chat/completions.
+
+    Без зависимостей (stdlib urllib) — пакет openai не нужен. Пустой ключ
+    допустим: локальные серверы (Ollama, LM Studio) его не требуют."""
+    import urllib.request
+    url = base_url.rstrip("/") + "/chat/completions"
+
+    def call(system: str, user: str) -> str:
+        body = json.dumps({
+            "model": model,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": user}],
+        }).encode()
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        req = urllib.request.Request(url, data=body, headers=headers)
+        with urllib.request.urlopen(req, timeout=600) as r:
+            data = json.load(r)
+        return data["choices"][0]["message"]["content"]
+    return call
 
 
 # --- Пример адаптера под Anthropic (не импортируется, если ключа нет) ----------

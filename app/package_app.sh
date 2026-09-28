@@ -4,7 +4,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-APP_NAME="MeetingTranscriber"
+APP_NAME="Terminus"
+# BUNDLE_ID НЕ менять при ребрендинге: на нём держатся выданные разрешения
+# macOS (Screen Recording, Microphone) — смена id сбросит их.
 BUNDLE_ID="com.serg.meeting-transcriber"
 BIN_SRC=".build/release/MeetingRecorder"     # имя SPM-таргета
 BUILD_DIR="/tmp/mt-build"
@@ -18,11 +20,14 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_SRC" "$APP/Contents/MacOS/$APP_NAME"
 
-echo "→ Иконка из logo.svg (прозрачный фон через rsvg-convert)…"
+echo "→ Иконка (брендинг TERMINUS, фолбэк — logo.svg)…"
 ICONSET="$BUILD_DIR/$APP_NAME.iconset"
 rm -rf "$ICONSET"; mkdir -p "$ICONSET"
 BASE="$BUILD_DIR/logo1024.png"
-if command -v rsvg-convert >/dev/null 2>&1; then
+if [ -f ../branding/terminus-icon-final.png ]; then
+  # Утверждённый знак TERMINUS (27-spider-cream), squircle с прозрачными углами
+  cp ../branding/terminus-icon-final.png "$BASE"
+elif command -v rsvg-convert >/dev/null 2>&1; then
   rsvg-convert -w 1024 -h 1024 logo.svg -o "$BASE"
 else
   echo "  rsvg-convert не найден (brew install librsvg) — фон может быть непрозрачным"
@@ -37,19 +42,27 @@ done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 
 echo "→ Info.plist…"
+# Версия = дата сборки, билд = git-коммит: в настройках видно, какая сборка
+# запущена (ловит «смотрю окно месячного процесса, а думаю что свежее»).
+VERSION="$(date +%Y.%m.%d)"
+BUILD="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>CFBundleName</key><string>$APP_NAME</string>
-  <key>CFBundleDisplayName</key><string>Meeting Transcriber</string>
+  <key>CFBundleDisplayName</key><string>Terminus</string>
   <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
   <key>CFBundleExecutable</key><string>$APP_NAME</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$BUILD</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
+  <!-- Выгрузка в ClickHouse идёт по HTTP (порт 8123, HTTPS у хоста не открыт);
+       без этого ATS режет запрос: «App Transport Security policy requires…» -->
+  <key>NSAppTransportSecurity</key>
+  <dict><key>NSAllowsArbitraryLoads</key><true/></dict>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>LSUIElement</key><true/>
   <key>MTProjectRoot</key><string>$(cd .. && pwd)</string>
@@ -74,6 +87,9 @@ else
 fi
 
 echo "→ Установка в /Applications…"
+# Ребрендинг: убрать старый бандл, чтобы не жило два приложения.
+rm -rf "/Applications/MeetingTranscriber.app" \
+       "$HOME/Applications/MeetingTranscriber.app" 2>/dev/null || true
 DEST="/Applications/$APP_NAME.app"
 if rm -rf "$DEST" 2>/dev/null && cp -R "$APP" "$DEST" 2>/dev/null; then
   echo "  установлено: $DEST"
@@ -89,9 +105,11 @@ echo "→ Ярлык на рабочий стол…"
 # UTF-8-локалью `$VAR` вплотную перед многобайтовым символом (напр. кавычкой-
 # ёлочкой) утягивает его лид-байт в имя переменной -> «unbound variable».
 # Скобки чинят это железно. Не плодим дубли перед созданием свежего ярлыка.
-LABEL="Meeting Transcriber"
+LABEL="Terminus"
 MADE=""
 rm -f "${HOME}/Desktop/${APP_NAME}" "${HOME}/Desktop/${LABEL}" \
+      "${HOME}/Desktop/Meeting Transcriber" \
+      "${HOME}/Desktop/MeetingTranscriber" \
       "${HOME}/Desktop/Псевдоним ${APP_NAME}"* 2>/dev/null || true
 # 1) Finder-алиас (красивый, с иконкой). Требует разрешения управлять Finder.
 if osascript -e "tell application \"Finder\" to make alias file to POSIX file \"${DEST}\" at desktop" \
@@ -109,5 +127,5 @@ fi
 
 echo ""
 echo "✓ Готово. Приложение: $DEST"
-echo "  Двойной клик по ярлыку на рабочем столе запускает Meeting Transcriber."
+echo "  Двойной клик по ярлыку на рабочем столе запускает Terminus."
 echo "  При первом запуске выдай Screen Recording + Microphone заново (новый бандл)."

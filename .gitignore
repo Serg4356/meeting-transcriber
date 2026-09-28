@@ -14,3 +14,7 @@ app/logo.svg.png
 *.log
 .pytest_cache/
 name_aliases.json
+
+# сборка iOS-компаньона
+ios/build/
+ios/Terminus.xcodeproj/
