@@ -213,7 +213,7 @@ struct SettingsView: View {
 
             Section("Выгрузка в общую базу") {
                 TextField("URL сервиса", text: $svcUrl,
-                          prompt: Text("https://meetings.example.internal"))
+                          prompt: Text("https://meetings.example.com"))
                 SecureField("Токен", text: $svcToken, prompt: Text("хранится локально (0600)"))
                 HStack {
                     Button("Получить токен…") {
